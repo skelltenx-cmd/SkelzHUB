@@ -1,0 +1,378 @@
+// SkelzHub - Prisma schema
+// Social media platform (Instagram/Lahelu style) + Shorts video + Admin moderation
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String    @id @default(cuid())
+  username    String    @unique
+  email       String?   @unique
+  password    String
+  displayName String
+  bio         String    @default("")
+  avatarColor Int       @default(0)
+  // Foto profil (opsional; null = avatar gradient)
+  avatarMediaId String?  @unique
+  // Mode privat: post hanya terlihat oleh pengikut yang disetujui
+  isPrivate   Boolean   @default(false)
+  // Role & moderasi: USER | ADMIN
+  role           String    @default("USER")
+  bannedAt       DateTime?
+  banReason      String?
+  sessionVersion Int       @default(0)
+  // Login 2FA: kode verifikasi email (hash sha256) + masa berlaku + hitungan salah
+  loginCodeHash    String?
+  loginCodeExpiry  DateTime?
+  loginCodeTries   Int      @default(0)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  avatarMedia   Media?  @relation("UserAvatar", fields: [avatarMediaId], references: [id], onDelete: SetNull)
+  // Online/last-seen: diperbarui heartbeat client
+  lastSeenAt    DateTime?
+  stories       Story[]
+  storyViews    StoryView[]
+  storyLikes    StoryLike[]
+  storyComments StoryComment[]
+  messageReactions MessageReaction[]
+  passwordResets PasswordReset[]
+  conversationsA  Conversation[] @relation("userA")
+  conversationsB  Conversation[] @relation("userB")
+  messagesSent    Message[]
+  posts     Post[]
+  likes     Like[]
+  comments  Comment[]
+  saves     Saved[]
+  followers Follow[]   @relation("follower")
+  following Follow[]   @relation("following")
+  notificationsReceived   Notification[] @relation("received")
+  notificationsTriggered  Notification[] @relation("actor")
+  reports   Report[]
+
+  @@index([username])
+}
+
+model Media {
+  id        String   @id @default(cuid())
+  mimeType  String   @default("image/jpeg")
+  // IMAGE | VIDEO | AUDIO
+  kind      String   @default("IMAGE")
+  // base64 encoded (kosong jika pakai externalUrl / r2Key)
+  data      String?
+  // URL media remote (mis. video shorts untuk seed)
+  externalUrl String?
+  // Kunci objek Cloudflare R2 (media disimpan di R2, bukan database).
+  // Jika terisi, media dilayani dari R2 (CDN super cepat) dan kolom data kosong.
+  r2Key     String?
+
+  createdAt DateTime @default(now())
+
+  posts     Post[]
+  avatarOf  User?   @relation("UserAvatar")
+  stories   Story[]
+  audioOfStory Story[] @relation("StoryAudio")
+  messages  Message[]
+}
+
+// Reaksi emoji pada pesan chat (satu user satu reaksi per pesan)
+model MessageReaction {
+  id        String   @id @default(cuid())
+  messageId String
+  userId    String
+  emoji     String
+  createdAt DateTime @default(now())
+
+  message Message @relation(fields: [messageId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+  @@index([messageId])
+}
+
+// Potongan file besar untuk unggah bertahap (chunk upload).
+// File di atas batas satu request serverless (~4.5MB di Vercel) dipecah
+// browser menjadi potongan-potongan ~4MB lalu dikirim satu per satu ke
+// /api/upload/chunk. Setelah semua potongan tiba, /api/upload/complete
+// menggabungkannya menjadi satu baris Media lalu menghapus potongannya.
+// Ukuran tiap potongan selalu kelipatan 3 byte supaya base64 tiap potongan
+// sejajar dan bisa digabung dengan langsung sambung-sambung string.
+model MediaChunk {
+  id        String   @id @default(cuid())
+  uploadKey String
+  index     Int
+  // ukuran asli potongan dalam byte
+  bytes     Int
+  // isi potongan (base64)
+  data      String
+  createdAt DateTime @default(now())
+
+  @@unique([uploadKey, index])
+  @@index([uploadKey])
+  @@index([createdAt])
+}
+
+model Post {
+  id        String   @id @default(cuid())
+  caption   String   @default("")
+  // Null untuk repost (media dipakai dari post aslinya)
+  mediaId   String?  @unique
+  // IMAGE | VIDEO (VIDEO tampil di Shorts)
+  type      String   @default("IMAGE")
+  // Repost/quote: post ini memposting ulang post lain
+  repostOfId String?
+  authorId  String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  media    Media?   @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  repostOf Post?    @relation("RepostOf", fields: [repostOfId], references: [id], onDelete: Cascade)
+  reposts  Post[]   @relation("RepostOf")
+  author   User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  likes    Like[]
+  comments Comment[]
+  saves    Saved[]
+  reports  Report[]
+  notifications Notification[]
+
+  @@index([authorId, createdAt])
+  @@index([type, createdAt])
+  @@index([repostOfId])
+}
+
+model Like {
+  id        String   @id @default(cuid())
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([postId])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  text      String
+  userId    String
+  postId    String
+  // Balasan komentar (null = komentar utama, bukan balasan)
+  parentId  String?
+  createdAt DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post     Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  parent   Comment? @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies  Comment[] @relation("CommentReplies")
+
+  @@index([postId, createdAt])
+  @@index([parentId])
+}
+
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String
+  followingId String
+  // PENDING (menunggu persetujuan akun privat) | ACCEPTED
+  status      String   @default("ACCEPTED")
+  createdAt   DateTime @default(now())
+
+  follower  User @relation("follower", fields: [followerId], references: [id], onDelete: Cascade)
+  following User @relation("following", fields: [followingId], references: [id], onDelete: Cascade)
+
+  @@unique([followerId, followingId])
+  @@index([followingId])
+  @@index([status, followingId])
+}
+
+model Saved {
+  id        String   @id @default(cuid())
+  userId    String
+  postId    String
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, postId])
+  @@index([userId, createdAt])
+}
+
+// Percakapan DM 1-1 (userA selalu id yang lebih kecil supaya unik per pasangan)
+model Conversation {
+  id         String    @id @default(cuid())
+  userAId    String
+  userBId    String
+  // Indikator "sedang mengetik" (timestamp terakhir; kadaluarsa 5 detik)
+  typingAAt  DateTime?
+  typingBAt  DateTime?
+  lastMessageAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  userA     User      @relation("userA", fields: [userAId], references: [id], onDelete: Cascade)
+  userB     User      @relation("userB", fields: [userBId], references: [id], onDelete: Cascade)
+  messages  Message[]
+
+  @@unique([userAId, userBId])
+}
+
+// Pesan dalam percakapan
+model Message {
+  id             String    @id @default(cuid())
+  conversationId String
+  senderId       String
+  text           String    @default("")
+  // TEXT | IMAGE | VIDEO | VOICE (media chat: foto/video/pesan suara)
+  kind           String    @default("TEXT")
+  mediaId        String?
+  readAt         DateTime?
+  createdAt      DateTime  @default(now())
+  // Edit pesan: kapan terakhir diedit (null = belum pernah)
+  editedAt       DateTime?
+  // Hapus pesan (soft delete): pesan hilang isinya, tinggal placeholder
+  deletedAt      DateTime?
+  // Balasan pesan (null = bukan balasan pesan lain)
+  replyToId      String?
+  // Berubah tiap kali baris diperbarui — dipakai polling untuk sinkron
+  // pesan baru DAN pesan yang diedit/dihapus lawan bicara.
+  updatedAt      DateTime  @default(now()) @updatedAt
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User         @relation(fields: [senderId], references: [id], onDelete: Cascade)
+  media        Media?       @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  replyTo      Message?     @relation("MessageReply", fields: [replyToId], references: [id], onDelete: SetNull)
+  replies      Message[]    @relation("MessageReply")
+  reactions    MessageReaction[]
+
+  @@index([conversationId, createdAt])
+  @@index([conversationId, updatedAt])
+}
+
+// Story: tampil 24 jam lalu dihapus otomatis
+model Story {
+  id        String   @id @default(cuid())
+  authorId  String
+  mediaId   String
+  // Musik/suara latar story (opsional) — diputar selama story berjalan
+  audioMediaId String?
+  caption   String   @default("")
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  author   User        @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  media    Media       @relation(fields: [mediaId], references: [id], onDelete: Cascade)
+  audio    Media?      @relation("StoryAudio", fields: [audioMediaId], references: [id], onDelete: SetNull)
+  views    StoryView[]
+  likes    StoryLike[]
+  comments StoryComment[]
+
+  @@index([authorId, createdAt])
+  @@index([expiresAt])
+}
+
+// Suka pada story (satu user satu story)
+model StoryLike {
+  id        String   @id @default(cuid())
+  storyId   String
+  userId    String
+  createdAt DateTime @default(now())
+
+  story Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, userId])
+  @@index([storyId])
+}
+
+// Komentar pada story (percakapan di bawah story) — mendukung balasan (reply)
+model StoryComment {
+  id        String   @id @default(cuid())
+  storyId   String
+  userId    String
+  text      String
+  // Balasan komentar story (null = komentar utama)
+  parentId  String?
+  createdAt DateTime @default(now())
+
+  story  Story         @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  user   User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  parent StoryComment? @relation("StoryCommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies StoryComment[] @relation("StoryCommentReplies")
+
+  @@index([storyId, createdAt])
+  @@index([parentId])
+}
+
+// Siapa saja yang sudah menonton sebuah story
+model StoryView {
+  id       String   @id @default(cuid())
+  storyId  String
+  userId   String
+  seenAt   DateTime @default(now())
+
+  story Story @relation(fields: [storyId], references: [id], onDelete: Cascade)
+  user  User  @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([storyId, userId])
+  @@index([storyId])
+}
+
+// Kode verifikasi reset password (dikirim via email)
+model PasswordReset {
+  id        String    @id @default(cuid())
+  userId    String
+  email     String
+  codeHash  String
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Notifikasi: like / komentar / follow / permintaan ikuti / repost
+model Notification {
+  id          String   @id @default(cuid())
+  userId      String   // penerima
+  actorId     String   // pelaku aksi
+  // LIKE | COMMENT | FOLLOW
+  type        String
+  postId      String?
+  commentText String?
+  read        Boolean  @default(false)
+  createdAt   DateTime @default(now())
+
+  user  User  @relation("received", fields: [userId], references: [id], onDelete: Cascade)
+  actor User  @relation("actor", fields: [actorId], references: [id], onDelete: Cascade)
+  post  Post? @relation(fields: [postId], references: [id], onDelete: Cascade)
+
+  @@index([userId, read, createdAt])
+}
+
+// Laporan konten dari user (ditinjau admin)
+model Report {
+  id         String   @id @default(cuid())
+  postId     String
+  reporterId String
+  reason     String   @default("")
+  // PENDING | RESOLVED | DISMISSED
+  status     String   @default("PENDING")
+  createdAt   DateTime @default(now())
+  resolvedAt DateTime?
+
+  post     Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  reporter User @relation(fields: [reporterId], references: [id], onDelete: Cascade)
+
+  @@unique([postId, reporterId])
+  @@index([status, createdAt])
+}

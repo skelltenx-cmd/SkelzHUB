@@ -1,0 +1,398 @@
+# DOKUMEN SUMBER SKELZHUB — API CONTRACT LENGKAP
+# (Untuk dibaca AI sebelum membangun aplikasi Android native SkelzHub)
+#
+# Dokumen ini berisi SEMUA yang diminta:
+# 1. Struktur database (prisma/schema.prisma) — lengkap
+# 2. SEMUA endpoint API — alamat, method, body, bentuk respons JSON PERSIS
+# 3. Mekanisme sesi login (cookie token)
+# 4. Mekanisme media & upload (R2 + chunk + streaming 206)
+# 5. Istilah tampilan (bahasa Indonesia) agar label di Android sama persis
+#
+# SERVER: kode ini berjalan di web saya. Alamat server dimasukkan pengguna
+# lewat layar "Hubungkan ke Server" saat pertama kali buka aplikasi.
+
+---
+
+## BAGIAN 0 — CARA KERJA SISTEM SECARA GLOBAL
+
+- Website: Next.js App Router. Semua fitur diakses lewat REST API di bawah /api.
+- Autentikasi: cookie bernama `skelzhub_session` (httpOnly). Login menghasilkan cookie; semua request berikutnya membawa cookie otomatis.
+- Media (gambar/video/audio): disimpan sebagai baris Media di database. Aplikasi TIDAK menerima file base64 di JSON. Sebagai gantinya, semua objek berisi field URL berupa STRING "/api/media/<mediaId>". Aplikasi tinggal memuat URL itu (relative terhadap alamat server).
+- Upload file dilakukan dulu ke endpoint upload (dapat mediaId), lalu mediaId dipakai untuk membuat post/story/pesan/avatar.
+
+---
+
+## BAGIAN 1 — PRISMA SCHEMA (struktur database lengkap)
+
+```prisma
+model User {
+  id            String    @id @default(cuid())
+  username      String    @unique
+  email         String?   @unique
+  password      String
+  displayName   String
+  bio           String    @default("")
+  avatarColor   Int       @default(0)
+  avatarMediaId String?   @unique
+  isPrivate     Boolean   @default(false)
+  role          String    @default("USER")   // USER | ADMIN | OWNER
+  bannedAt      DateTime?
+  banReason     String?
+  sessionVersion Int      @default(0)
+  loginCodeHash    String?
+  loginCodeExpiry  DateTime?
+  loginCodeTries   Int      @default(0)
+  lastSeenAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+}
+
+model Media {
+  id          String   @id @default(cuid())
+  mimeType    String   @default("image/jpeg")
+  kind        String   @default("IMAGE")   // IMAGE | VIDEO | AUDIO
+  data        String?                    // base64 (legacy)
+  externalUrl String?
+  r2Key       String?                    // kunci Cloudflare R2
+  createdAt   DateTime @default(now())
+}
+
+model MediaChunk {
+  id        String   @id @default(cuid())
+  uploadKey String
+  index     Int
+  bytes     Int
+  data      String   // base64 per potongan
+  createdAt DateTime @default(now())
+  @@unique([uploadKey, index])
+}
+
+model Post {
+  id         String   @id @default(cuid())
+  caption    String   @default("")
+  mediaId    String?  @unique
+  type       String   @default("IMAGE")   // IMAGE | VIDEO (VIDEO tampil di Shorts)
+  repostOfId String?                    // post ini repost post lain
+  authorId   String
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
+model Like   { id, userId, postId, createdAt; @@unique([userId, postId]) }
+model Comment {
+  id        String   @id @default(cuid())
+  text      String
+  userId    String
+  postId    String
+  parentId  String?   // null = komentar utama; terisi = balasan
+  createdAt DateTime @default(now())
+}
+model Follow {
+  id          String @id @default(cuid())
+  followerId  String
+  followingId String
+  status      String @default("ACCEPTED")   // PENDING | ACCEPTED
+  createdAt   DateTime @default(now())
+  @@unique([followerId, followingId])
+}
+model Saved { id, userId, postId, createdAt; @@unique([userId, postId]) }
+
+model Conversation {
+  id         String  @id @default(cuid())
+  userAId    String   // selalu id lebih kecil
+  userBId    String
+  typingAAt  DateTime?
+  typingBAt  DateTime?
+  lastMessageAt DateTime?
+  createdAt   DateTime @default(now())
+  @@unique([userAId, userBId])
+}
+
+model Message {
+  id             String   @id @default(cuid())
+  conversationId String
+  senderId       String
+  text           String   @default("")
+  kind           String   @default("TEXT")   // TEXT | IMAGE | VIDEO | VOICE
+  mediaId        String?
+  readAt         DateTime?
+  createdAt      DateTime @default(now())
+  editedAt       DateTime?                   // null = belum pernah diedit
+  deletedAt      DateTime?                   // soft delete
+  replyToId      String?                     // balasan pesan lain
+  updatedAt      DateTime @updatedAt         // naik tiap perubahan → dipakai polling
+}
+
+model Story {
+  id           String   @id @default(cuid())
+  authorId     String
+  mediaId      String
+  audioMediaId String?    // musik latar (opsional, kind AUDIO)
+  caption      String   @default("")
+  expiresAt    DateTime                   // 24 jam lalu otomatis dihapus
+  createdAt    DateTime @default(now())
+}
+model StoryLike    { id, storyId, userId, createdAt; @@unique([storyId, userId]) }
+model StoryComment { id, storyId, userId, text, parentId?, createdAt }
+model StoryView    { id, storyId, userId, seenAt; @@unique([storyId, userId]) }
+
+model PasswordReset { id, userId, email, codeHash, expiresAt, usedAt?, createdAt }
+model Notification {
+  id          String @id @default(cuid())
+  userId      String          // penerima
+  actorId     String          // pelaku
+  type        String          // LIKE | COMMENT | FOLLOW | FOLLOW_REQUEST | FOLLOW_ACCEPT | REPOST
+  postId      String?
+  commentText String?
+  read        Boolean @default(false)
+  createdAt   DateTime @default(now())
+}
+model Report { id, postId, reporterId, reason, status(PENDING|RESOLVED|DISMISSED), createdAt, resolvedAt }
+```
+
+---
+
+## BAGIAN 2 — KONVENSI GLOBAL API
+
+- Semua respons error berbentuk: `{ "error": "pesan bahasa Indonesia" }` dengan status 400/401/403/404/409/429.
+- Respons daftar SELALU dibungkus objek: `{ posts: [...], nextPage: number|null, hasMore: boolean }` — TIDAK PERNAH array telanjang. Sama untuk comments dan users.
+- Media selalu sebagai STRING URL: `"/api/media/<id>"` pada field bernama `media`, `avatar`, `audio`, `postMedia`. Gabungkan dengan alamat server.
+- UserBrief (dipakai di semua tempat user disematkan): `{ id, username, displayName, avatarColor, avatar (string|null), role ("USER"|"ADMIN"|"OWNER") }`
+- PostDTO: `{ id, caption, media (string|null), type ("IMAGE"|"VIDEO"), createdAt, author: UserBrief, likeCount, commentCount, repostCount, likedByMe, savedByMe, repostedByMe, repostOf (PostDTO|null), previewComments (CommentDTO[], maks 2) }`
+- CommentDTO: `{ id, text, createdAt, parentId, replyTo: UserBrief|null, author: UserBrief }`
+- UserDTO (profil): `{ id, username, displayName, bio, avatarColor, avatar, isPrivate, role, lastSeenAt, postCount, followerCount, followingCount, isFollowing, followStatus ("NONE"|"PENDING"|"ACCEPTED"), isMe }`
+
+---
+
+## BAGIAN 3 — ENDPOINT AUTENTIKASI
+
+### POST /api/auth/login
+Body: `{ username, password }` (username boleh username ATAU email).
+Dua hasil:
+- Akun tanpa email terverifikasi → session langsung: `{ step: "done", user: { id, username, email, displayName, bio, avatarColor, avatar, isPrivate, role } }`
+- Akun dengan email (2FA) → `{ step: "code", userId, email (dimasking spt "sk••••@gmail.com"), emailSent, emailConfigured }` — session BELUM dibuat. Lanjut ke verify.
+Error 401 kredensial salah; 403 kena ban.
+
+### POST /api/auth/login/verify
+Body: `{ userId, code }` (kode 6 digit, berlaku 10 menit, maks 5 percobaan).
+Sukses → session dibuat → `{ step: "done", user: {...} }`.
+
+### POST /api/auth/register
+Body: `{ username, displayName?, email, password }`. Username regex `[a-zA-Z0-9._]{3,20}`; password min 6.
+→ `{ step: "done", user: {...} }`. 409 kalau username/email sudah dipakai.
+
+### POST /api/auth/logout
+Tanpa body. → `{ ok: true }`.
+
+### GET /api/auth/me
+→ `{ user: {...}|null }`.
+
+### POST /api/auth/forgot-password  |  POST /api/auth/reset-password
+Body reset: `{ email, code, newPassword }` → `{ ok: true }`.
+
+## BAGIAN 4 — POSTS
+
+### GET /api/posts
+Query: `feed` = home | following | explore | shorts | saved | reposts; `username` (profil); `page` (mulai 0); `limit` (default 12, maks 50).
+→ `{ posts: PostDTO[], nextPage, hasMore }`.
+
+### POST /api/posts  (login)
+Body: `{ caption?, mediaId }` ATAU `{ caption?, repostOfId }`. → `{ post: PostDTO }`.
+
+### GET /api/posts/[id]  →  `{ post: PostDTO }`  (403 kalau akun privat & bukan pengikut)
+
+### DELETE /api/posts/[id]  (pemilik/admin)  →  `{ ok: true }`
+
+### GET /api/posts/[id]/comments  →  `{ comments: CommentDTO[], nextPage, hasMore }` (page/limit)
+### POST /api/posts/[id]/comments  (login)
+Body: `{ text (maks 500), parentId? }` → `{ comment: CommentDTO & { isMine: true } }`.
+### POST /api/posts/[id]/like  → `{ liked: boolean, likeCount }` (toggle)
+### POST /api/posts/[id]/repost → `{ reposted, repostCount }` (toggle)
+### POST /api/posts/[id]/save  → `{ saved: boolean }` (toggle)
+### POST /api/posts/[id]/report Body: `{ reason }` → `{ ok: true }`
+
+CATATAN: kalau [id] adalah repost, semua interaksi otomatis diarahkan ke post ASLINYA oleh server.
+
+## BAGIAN 5 — STORIES
+
+### GET /api/stories  (login)
+→ `{ groups: [ { author: UserBrief, items: [ { id, media, type, caption, createdAt, seen (boolean), likeCount, likedByMe, commentCount, viewCount, audio } ], hasUnseen, isMe, latestAt } ] }`
+Grup sendiri paling depan, lalu belum-dilihat, lalu sudah-dilihat.
+### POST /api/stories  (login)  Body: `{ mediaId, caption?, audioMediaId? }` → `{ storyId }`
+### DELETE /api/stories/[id] (pemilik/admin) → `{ ok: true }`
+### POST /api/stories/[id]/view → `{ ok: true }` (idempotent)
+### POST /api/stories/[id]/like → `{ liked, likeCount }`
+### GET  /api/stories/[id]/comments → `{ comments: [...] }` (maks 200, urut lama→baru)
+### POST /api/stories/[id]/comments Body: `{ text, parentId? }` → `{ comment }`
+### DELETE /api/stories/[id]/comments?commentId=xxx → `{ ok: true }`
+(GET /api/stories/[id] khusus pemilik: daftar penonton — TIDAK dipakai aplikasi umum.)
+
+## BAGIAN 6 — CHAT (percakapan & pesan)
+
+### GET /api/conversations  (login)
+→ `{ conversations: [ { id, user: UserBrief & { online, lastSeenAt }, lastMessage (string maks 80|null), lastMessageKind, lastMessageDeleted, lastMessageAt, lastMessageMine, unread } ], unread (total) }`
+
+### POST /api/conversations  Body: `{ username }` → `{ conversationId }`
+
+### GET /api/conversations/[id]/messages  (login, peserta)
+Dua mode:
+1. Riwayat: `?page=0&limit=40` → `{ messages: MessageDTO[], other: Presence, nextPage, hasMore }`
+2. POLLING: `?since=<ISO datetime>` → mengambil semua pesan dengan updatedAt > since (mencakup pesan baru + diedit + dihapus + reaksi berubah). → `{ messages: MessageDTO[], other: Presence, mineLastReadAt }`
+Mode polling MENANDAI pesan masuk sebagai dibaca.
+MessageDTO: `{ id, text, kind ("TEXT"|"IMAGE"|"VIDEO"|"VOICE"), media (string|null), mine (boolean), createdAt, readAt, editedAt, deleted (boolean), updatedAt, replyTo: { id, text, kind, senderName, senderMine, deleted }|null, reactions: [ { emoji, count, mine } ] }`
+Presence (other): `{ user: UserBrief, online, lastSeenAt, typing }`
+
+### POST /api/conversations/[id]/messages
+Body: `{ text? (maks 1000), mediaId?, replyToId? }` → `{ message: MessageDTO }`
+
+### PATCH /api/conversations/[id]/messages
+Body: `{ messageId, text }` (hanya pesan teks sendiri) → `{ message: MessageDTO }`
+
+### DELETE /api/conversations/[id]/messages?messageId=xxx → `{ ok: true }` (soft delete)
+
+### POST /api/conversations/[id]/messages/react
+Body: `{ messageId, emoji }` — emoji yang diizinkan: ❤️ 👍 😂 😮 😢 🔥. Toggle: kirim sama = hapus. → `{ ok: true, messageId, emoji: string|null }`
+
+### POST /api/conversations/[id]/typing → `{ ok: true }` (kirim tiap ~2 detik saat mengetik; kadaluarsa 5 detik)
+
+POLA POLLING WEB (tiru di Android): daftar percakapan tiap 2 detik; pesan aktif `?since=` tiap 1 detik; kursor = updatedAt pesan terbaru; heartbeat online `POST /api/me/heartbeat` tiap 25 detik.
+
+## BAGIAN 7 — MEDIA & UPLOAD
+
+### GET /api/media/[id]  — BUKAN JSON: file biner gambar/video/audio.
+Dukung header `Range` → 206 Partial Content (WAJIB dimanfaatkan ExoPlayer untuk video). Ada kemungkinan 302 redirect (media di CDN Cloudflare) — OkHttp mengikuti redirect otomatis. Cache-Control panjang — aman di-cache.
+
+### ALUR UPLOAD (3 jalur, cek kemampuan dulu):
+1. PROBE: `GET /api/upload/r2-presign` → `{ enabled: boolean }`.
+2. Jika enabled (disarankan): `POST /api/upload/r2-presign` body `{ filename, mimeType, size }` → `{ uploadUrl, key, kind, mimeType, maxBytes, maxBytesMB }` lalu PUT file LANGSUNG ke uploadUrl (biner), lalu `POST /api/upload/r2-complete` body `{ key, mimeType }` → `{ mediaId, url, kind, mimeType }`.
+3. Jika tidak: file kecil (≤4MB) → `POST /api/upload` multipart field `file` → `{ mediaId, url, kind, mimeType }`.
+4. File besar tanpa R2 → pecah jadi potongan 4.194.399 byte (kelipatan 3!): kirim tiap potongan ke `POST /api/upload/chunk` multipart fields `key,index,total,file` → `{ ok, index, total }`; setelah semua tiba `POST /api/upload/complete` body `{ key, totalChunks, mimeType }` → `{ mediaId, url, kind, mimeType }`.
+
+## BAGIAN 8 — USERS / ME / NOTIFIKASI / LAINNYA
+
+### GET /api/users?search=q → `{ users: UserDTO[] }` (maks 10)
+### GET /api/users/[username] → `{ user: UserDTO }`
+### PATCH /api/users/[username] (hanya diri sendiri) Body: `{ displayName?, bio? }` → `{ user }`
+### POST /api/users/[username]/follow (login, toggle) → `{ following, pending, followerCount }`
+  (Akun privat → pending true sampai disetujui.)
+### GET /api/users/[username]/followers | /following → `{ users: [...] }`
+### PATCH /api/me Body: `{ displayName?, bio?, isPrivate?, avatarMediaId?, currentPassword?, newPassword? }` → `{ user, passwordChanged }`
+  (avatarMediaId harus media IMAGE; null = hapus foto profil)
+### POST /api/me/heartbeat → `{ ok: true, lastSeenAt }`
+### GET /api/notifications → `{ unread, items: [ { id, type, read, createdAt, commentText, actor: UserBrief, postId, postMedia, postType } ] }`
+### POST /api/notifications → tandai semua dibaca → `{ ok: true }`
+### GET /api/suggestions → `{ users: UserDTO[] }` (maks 5)
+### GET /api/follow-requests → `{ requests: [ { followId, createdAt, user } ] }`
+### PATCH /api/follow-requests Body: `{ followId, action: "accept"|"reject" }` → `{ ok, accepted }`
+
+## BAGIAN 9 — ISTILAH TAMPILAN (bahasa Indonesia — samakan di Android)
+
+Navigasi: Beranda, Shorts, Jelajahi, Buat, Notifikasi, Tersimpan, Admin, Profil, Pesan, Pengaturan, Masuk, Keluar.
+Tombol/status: Ikuti, Mengikuti, Diminta, Berhenti ikuti, Batalkan permintaan, Pesan, Simpan, Batal, Kirim, Hapus, Simpan perubahan, "Diedit" (penanda pesan diedit).
+Hitungan: pengikut, mengikuti, postingan, suka.
+Feed: "Buat post", "Selamat datang di SkelzHub", "Feed masih kosong", "Kamu sudah melihat semua post.", "Tambahkan komentar...", "Lihat semua {n} komentar", "Salin link", "Laporkan post", "Hapus post", "memposting ulang", "Posting ulang", "Kutip dengan komentar".
+Profil: "Ubah profil", "Akun tidak ditemukan", "Akun ini privat", "Ikuti @{u} untuk melihat postingan dan Shorts mereka."
+Privat/Publik: Privat, Publik.
+Chat: "Pratinjau lampiran", "Gagal mengirim lampiran", "File tidak didukung", konfirmasi sebelum kirim: "Kirim pesan ini?"
+Badge khusus: "Owner" (role OWNER), "Admin" (role ADMIN).
+
+---
+
+## BAGIAN 10 — TUGAS ANDA
+
+Buat aplikasi Android NATIVE "SkelzHub" (Kotlin + Jetpack Compose Material 3, MVVM + Repository, Retrofit + OkHttp + Gson, Coil untuk gambar, Media3 ExoPlayer untuk video dengan dukungan Range/206, DataStore untuk alamat server + sesi cookie).
+
+WAJIB:
+1. Layar "Hubungkan ke Server" saat pertama buka: kolom alamat (https://...), tombol "Periksa" (GET /api/auth/me), tombol Simpan (DataStore). Bisa diganti di Pengaturan.
+2. OkHttp harus MENERUSKAN COOKIE `skelzhub_session` otomatis (CookieJar) dan menyimpan cookie agar tetap login (auto-login saat dibuka lagi).
+3. SEMUA field JSON, alamat endpoint, dan bentuk body HARUS persis seperti dokumen ini. Jangan mengarang field sendiri.
+4. Upload mengikuti ALUR BAGIAN 7 (probe R2 → presign → PUT → complete; fallback upload/chunk).
+5. Chat mengikuti pola polling BAGIAN 6 (2 detik daftar, 1 detik pesan ?since=, typing indicator, heartbeat 25 detik).
+6. Shorts = video vertikal layar penuh (feed=shorts), geser atas-bawah, ExoPlayer.
+7. Story: cincin berwarna jika ada `hasUnseen`, hilang otomatis setelah 24 jam, dukung musik (field audio).
+8. Foto profil & foto chat bisa diklik diperbesar (zoom lightbox).
+9. Semua label bahasa Indonesia sesuai BAGIAN 9. Identitas "SkelzHub" — tanpa nama brand lain.
+10. Tulis SEMUA file lengkap (Gradle + semua source) dengan nama foldernya penuh, tanpa placeholder/TODO, versi dependency yang cocok, komentar bahasa Indonesia. Akhiri dengan 5 langkah: buka di Android Studio, isi alamat server, build APK.
+
+---
+
+## BAGIAN 11 — SUPABASE + CACHE CLOUDFLARE (perubahan 2026-11)
+
+DATABASE produksi kini dipasang sebagai Supabase (Postgres pooler).
+Tidak ada perubahan model/endpoin API sama sekali — hanya infrastruktur.
+
+Env Vercel (mode produksi):
+- DATABASE_URL        : URL pooler Supabase port 6543 + `?pgbouncer=true&connection_limit=1&sslmode=require`
+                        (db.ts otomatis membersihkan URL; prepare-db.mjs otomatis memilih provider "postgresql")
+- MIGRATE_SOURCE_URL  : URL database LAMA (CockroachDB) — HANYA selama proses pindah, hapus setelah selesai
+- MIGRATE_SECRET      : teks rahasia untuk membuka endpoint migrasi — HANYA selama proses pindah, hapus setelah selesai
+- R2_PUBLIC_URL       : (sudah ada) ganti ke domain custom R2, mis. https://cdn.skelzhub.my.id —
+                        media lalu dilayani langsung dari edge Cloudflare (gratis, tanpa fungsi Vercel)
+
+Endpoint BARU admin (sekali pakai saat pindah database):
+### GET/POST /api/admin/migrate-db
+- Proteksi: header `x-migrate-secret` ATAU query `?secret=` = MIGRATE_SECRET (tanpa env -> 404).
+- POST body opsional `{ "sourceUrl": "postgresql://..." }` bila tak mau pakai env.
+- Salin semua tabel (User..MediaChunk, urut aman-FK, self-ref dua tahap, ON CONFLICT DO NOTHING -> idempoten).
+- Respons: `{ ok, pesan, provider, waktu, tabel: [{tabel, baris, tersalin, selesai, error?}], jumlah_baris: {Tabel:{lama,baru}} }`.
+- Kalau `ok:false` karena waktu habis: PANGGIL LAGI, migrasi lanjut tanpa dobel.
+- db-setup TIDAK membuat konten demo bila MIGRATE_SOURCE_URL terpasang (migrasi membawa data asli).
+
+Cache (Cloudflare zone skelzhub.my.id):
+- Cache Rule 1: URI Path starts_with "/api/media/" -> Eligible, Edge TTL 1 jam (origin sudah kirim Cache-Control public).
+- Cache Rule 2: Hostname eq "cdn.skelzhub.my.id" -> Eligible, Edge TTL 1 bulan (objek immutable).
+- R2 custom domain cdn.skelzhub.my.id dihubungkan di bucket R2 -> Settings -> Custom Domains.
+- DNS www/@ proxy aktif (awan oranye) agar rule berlaku; aktifkan Smart Tiered Cache.
+
+---
+
+## BAGIAN 12 — PENAMBAHAN (perbaikan performa & bug, 2026-11-20)
+
+- vercel.json: functions region = sin1 (Singapura) — dekat Supabase & pengguna Indonesia.
+- GET /api/suggestions kini menyertakan `isMe` + `followStatus` per user ("NONE"|"PENDING"|"ACCEPTED").
+  Tombol Ikuti di panel saran (desktop & mobile) optimistik: berubah seketika, tanpa memuat ulang.
+- Polling daftar percakapan: 3 dtk di halaman Pesan, 10 dtk di tempat lain (badge).
+- /api/media/[id]: AWS SDK & sharp dimuat lazy (cold start jauh lebih cepat).
+- Micro-cache user aktif 5 dtk di server (hemat 1 query per request).
+- Probe R2 di client: hasil "mati" hanya diingat 20 dtk (cold start tidak lagi membuat upload salah jalur).
+
+=====================================================================
+BAGIAN 12 — OPTIMASI v4 (wajib dibaca sebelum lanjut develop)
+=====================================================================
+
+A. maxDuration = 60 di SEMUA route API
+   - Vercel Hobby default fungsi serverless = 10 dtk; database jauh
+     (pooler Supabase Singapura) bisa melewatinya saat sibuk -> fungsi
+     dibunuh -> error 500 "terjadi kesalahan server".
+   - Semua route kini export const maxDuration = 60.
+
+B. Polling lebih hemat (sumber utama "lag"):
+   - badge DM (sidebar/header): conversations 10 dtk -> 30 dtk
+   - notifikasi: 15 dtk -> 30 dtk
+   - stories: 30 dtk -> 60 dtk (tetap refresh saat kembali ke tab)
+   - halaman Pesan: daftar 3 dtk + poll pesan 2 dtk (dipertahankan)
+   - poll pesan ?since= TIDAK LAGI menulis DB tiap 2 dtk:
+     updateMany readAt hanya saat ada pesan lawan yang belum dibaca.
+
+C. Sinkronisasi chat:
+   - kursor "since" TIDAK lagi dihitung dari pesan optimistik (jam client
+     bisa lebih maju dari server -> pesan lawan terlewat sampai refresh)
+   - kunci in-flight pada tick (tidak tumpang tindih saat jaringan lambat)
+   - auto-scroll reset saat pindah percakapan
+
+D. Follow: notifikasi fire-and-forget -> balasan lebih cepat.
+   Suggestions: query fallback dilewati bila kandidat populer cukup.
+
+E. UI:
+   - shell: rute imersif (shorts/pesan) tanpa pb-[60px] ganda
+   - shorts: tinggi 100dvh-118px-env(safe-area) (dulu 124px salah)
+   - messages: 100dvh-118px-env(safe-area)
+   - post-card: baris aksi px-3/sm:px-4 (sejajar header/caption) + hover
+     seragam di 4 tombol; video autoplay mulai BISU (stabil) + tombol suara
+   - story ring: overlay absolut (tanpa pertumbuhan layout 6px)
+   - animasi story-ring: transform-only (tanpa box-shadow repaint)
+   - feed: animasi mount tunggal (stagger CSS dihapus)
+   - kolom konten seragam 470px: feed/notifikasi/create/settings
+
+F. create.tsx: dua input terpisah (tombol Ganti media tidak mati lagi),
+   fase "Memproses..." setelah unggah, toast tunggal sesuai tahap gagal.

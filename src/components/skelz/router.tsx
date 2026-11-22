@@ -6,7 +6,7 @@ import { useCallback, useSyncExternalStore } from "react";
 
 export type Route =
   | { view: "feed" }
-  | { view: "explore" }
+  | { view: "explore"; q?: string }
   | { view: "shorts" }
   | { view: "create" }
   | { view: "saved" }
@@ -22,6 +22,14 @@ export type Route =
 
 const FALLBACK_ROUTE: Route = { view: "feed" };
 
+// Ambil ?q= dari hash (#/explore?q=kucing) — dipakai deep-link hashtag.
+function exploreQueryFromHash(hash: string): string | undefined {
+  const query = hash.split("?")[1] ?? "";
+  const params = new URLSearchParams(query);
+  const q = params.get("q");
+  return q ? q.slice(0, 60) : undefined;
+}
+
 export function parseHash(hash: string): Route {
   const path = hash.replace(/^#\/?/, "").split("?")[0];
   const [head, second] = path.split("/");
@@ -30,7 +38,7 @@ export function parseHash(hash: string): Route {
     case "feed":
       return { view: "feed" };
     case "explore":
-      return { view: "explore" };
+      return { view: "explore", q: exploreQueryFromHash(hash) };
     case "shorts":
       return { view: "shorts" };
     case "create":
@@ -65,7 +73,7 @@ export function routeToPath(route: Route): string {
     case "feed":
       return "#/";
     case "explore":
-      return "#/explore";
+      return route.q ? `#/explore?q=${encodeURIComponent(route.q)}` : "#/explore";
     case "shorts":
       return "#/shorts";
     case "create":

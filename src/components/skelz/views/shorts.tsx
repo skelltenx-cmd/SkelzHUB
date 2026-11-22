@@ -3,11 +3,16 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
 import {
+  Bookmark,
+  Check,
+  ChevronDown,
+  ChevronUp,
   Clapperboard,
   Heart,
   Loader2,
   MessageCircle,
   Play,
+  Plus,
   Send,
   Share2,
   Trash2,
@@ -27,8 +32,11 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { toast } from "@/hooks/use-toast";
 import { cn } from "@/lib/utils";
-import type { Comment, Me, Post } from "@/lib/types";
-import { useAddComment, useComments, useDeleteComment, useInfinitePosts, useLike } from "../hooks";
+import type { Comment, FollowStatus, Me, Post } from "@/lib/types";
+import { useAddComment, useComments, useDeleteComment, useFollow, useInfinitePosts, useLike, useSave } from "../hooks";
+import { useShortsSound } from "../shorts-sound";
+import { EmojiPickerButton } from "../emoji-picker";
+import { RichText } from "../richtext";
 import { UserAvatarLink } from "../user-avatar";
 import { formatCount, timeAgo } from "../utils";
 
@@ -51,18 +59,24 @@ function ShortSkeleton() {
 
 // ---- Keadaan kosong ----
 
-function ShortsEmpty() {
+function ShortsEmpty({ following = false }: { following?: boolean }) {
   return (
     <section className="flex h-full snap-start items-center justify-center p-4" aria-label="Belum ada Shorts">
       <div className="flex max-w-sm flex-col items-center gap-3 rounded-xl border bg-card p-8 text-center shadow-sm">
         <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-gradient-to-br from-rose-500/20 to-orange-400/20">
           <Clapperboard className="h-7 w-7 text-rose-500" aria-hidden="true" />
         </div>
-        <h2 className="text-lg font-bold">Belum ada Shorts</h2>
-        <p className="text-sm text-muted-foreground">Bagikan video pendek pertamamu!</p>
-        <a href="#/create" className="mt-1">
+        <h2 className="text-lg font-bold">
+          {following ? "Belum ada video dari yang kamu ikuti" : "Belum ada Shorts"}
+        </h2>
+        <p className="text-sm text-muted-foreground">
+          {following
+            ? "Ikuti lebih banyak akun di Jelajahi agar videonya muncul di sini."
+            : "Bagikan video pendek pertamamu!"}
+        </p>
+        <a href={following ? "#/explore" : "#/create"} className="mt-1">
           <Button className="bg-gradient-to-r from-rose-500 to-orange-400 text-white hover:opacity-90">
-            Buat Short
+            {following ? "Jelajahi akun" : "Buat Short"}
           </Button>
         </a>
       </div>
@@ -283,7 +297,8 @@ function CommentsBody({ post, me, onNeedLogin }: { post: Post; me: Me | null; on
             </button>
           </div>
         )}
-        <div className="flex items-center gap-2">
+        <div className="flex items-center gap-1.5">
+          <EmojiPickerButton onPick={(emoji) => setText((t) => (t ?? "") + emoji)} />
           <Input
             value={text}
             onChange={(e) => setText(e.target.value)}
@@ -336,30 +351,51 @@ function ShortCommentsDialog({
 
 // ---- Satu Short ----
 
-function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | null; onNeedLogin: () => void; nextMedia?: string | null }) {
+function ShortItem({
+  post,
+  me,
+  onNeedLogin,
+  nextMedia,
+  followStatus,
+  onToggleFollow,
+}: {
+  post: Post;
+  me: Me | null;
+  onNeedLogin: () => void;
+  nextMedia?: string | null;
+  followStatus?: FollowStatus;
+  onToggleFollow: (username: string) => void;
+}) {
   const like = useLike(onNeedLogin);
+  const save = useSave(onNeedLogin);
 
   const [commentsOpen, setCommentsOpen] = useState(false);
   const [captionExpanded, setCaptionExpanded] = useState(false);
   const [heartBurst, setHeartBurst] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
-  // Suara Short: default NYALA (tidak otomatis dibisukan). Kalau browser
-  // memblokir autoplay bersuara -> fallback bisu + tanda jelas untuk menyalakan.
-  const [muted, setMuted] = useState(false);
+  // Preferensi bisu GLOBAL (persist) — konsisten di semua Short seperti TikTok.
+  const muted = useShortsSound((s) => s.muted);
+  // Tanda "autoplay bersuara diblokir browser" hanya untuk Short yang terkena.
   const [soundBlocked, setSoundBlocked] = useState(false);
   const [visible, setVisible] = useState(false);
   const [videoReady, setVideoReady] = useState(false);
   const [videoProgress, setVideoProgress] = useState(0);
+  // Durasi video (state, bukan ref — agar aman dipakai saat render)
+  const [videoDuration, setVideoDuration] = useState(0);
+  // Waktu target saat menggeser bar progres (null = tidak menggeser)
+  const [scrubTime, setScrubTime] = useState<number | null>(null);
 
   const sectionRef = useRef<HTMLElement | null>(null);
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastTapRef = useRef(0);
+  const heartTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const scrubFracRef = useRef(0);
 
-  // Autoplay hanya saat Short terlihat >60% (satu observer per Short).
-  // Coba diputar BERSUARA dulu; browser yang memblokir -> bisu + tanda.
-  // Saat terlihat, video SHORT BERIKUTNYA juga di-pra-ambil (metadata)
-  // supaya scroll ke bawah langsung bisa diputar tanpa jeda.
+  // Autoplay hanya saat Short terlihat >60%. SETIAP KALI Short menjadi aktif
+  // (masuk / dimasuki lagi), video SELALU DIRESET ke awal — perilaku TikTok:
+  // menonton ulang short selalu mulai dari 0, bukan melanjutkan posisi lama.
+  // Video berikutnya juga di-pra-ambil (metadata) supaya swipe mulus.
   useEffect(() => {
     const section = sectionRef.current;
     const video = videoRef.current;
@@ -370,7 +406,18 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
         for (const entry of entries) {
           if (entry.isIntersecting) {
             setVisible(true);
-            video.muted = false; // suara langsung menyala
+            // Selalu mulai dari awal saat Short jadi aktif (re-watch = dari 0)
+            try {
+              if (video.currentTime > 0 || !video.paused) {
+                video.currentTime = 0;
+              }
+            } catch {
+              /* seek sebelum metadata siap — abaikan */
+            }
+            setVideoProgress(0);
+            // Ikuti preferensi bisu global (bukan lagi dipaksa bersuara —
+            // dulu bikin desync: video bunyi tapi ikon masih "bisu")
+            video.muted = useShortsSound.getState().muted;
             video
               .play()
               .then(() => {
@@ -378,9 +425,10 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
               })
               .catch(() => {
                 // Browser memblokir autoplay bersuara -> putar bisu dulu,
-                // tampilkan tanda agar pengguna bisa menyalakannya dengan satu ketukan.
+                // simpan preferensi global supaya Short berikutnya tak mencoba
+                // bersuara lagi, dan tampilkan tanda satu-ketukan.
                 video.muted = true;
-                setMuted(true);
+                useShortsSound.getState().setMuted(true);
                 setSoundBlocked(true);
                 video.play().then(() => setIsPaused(false)).catch(() => setIsPaused(true));
               });
@@ -394,6 +442,13 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
           } else {
             setVisible(false);
             video.pause();
+            // Keluar layar juga reset ke awal — konsisten "lihat lagi = dari awal"
+            try {
+              video.currentTime = 0;
+            } catch {
+              /* abaikan */
+            }
+            setVideoProgress(0);
           }
         }
       },
@@ -403,17 +458,17 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
     return () => observer.disconnect();
   }, [nextMedia]);
 
-  // Sinkronkan status bisu ke elemen video
+  // Sinkronkan status bisu global ke elemen video
   useEffect(() => {
     const video = videoRef.current;
     if (video) video.muted = muted;
   }, [muted]);
 
-  // Batalkan timer ketuk tunggal yang tersisa saat komponen dilepas
+  // Batalkan timer ketuk tunggal & animasi hati saat komponen dilepas
   useEffect(() => {
-    const timer = tapTimerRef;
     return () => {
-      if (timer.current) clearTimeout(timer.current);
+      if (tapTimerRef.current) clearTimeout(tapTimerRef.current);
+      if (heartTimerRef.current) clearTimeout(heartTimerRef.current);
     };
   }, []);
 
@@ -430,7 +485,8 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
   function handleDoubleTapLike() {
     if (!post.likedByMe) like.mutate(post.id);
     setHeartBurst(true);
-    setTimeout(() => setHeartBurst(false), 700);
+    if (heartTimerRef.current) clearTimeout(heartTimerRef.current);
+    heartTimerRef.current = setTimeout(() => setHeartBurst(false), 700);
   }
 
   // Ketuk tunggal = putar/jeda; ketukan ganda = suka (dibedakan lewat timer)
@@ -455,10 +511,48 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
 
   function toggleMute() {
     const next = !muted;
-    setMuted(next);
+    useShortsSound.getState().setMuted(next);
     const video = videoRef.current;
     if (video) video.muted = next;
     if (!next) setSoundBlocked(false); // suara sudah dinyalakan pengguna
+  }
+
+  // Geser bar progres: tarik-lepas untuk melompat waktu (dengan gelembung waktu)
+  function handleScrubStart(e: React.PointerEvent<HTMLDivElement>) {
+    e.preventDefault();
+    const bar = e.currentTarget as HTMLElement;
+    const rect = bar.getBoundingClientRect();
+    const video = videoRef.current;
+    const duration = video && Number.isFinite(video.duration) && video.duration > 0 ? video.duration : 0;
+
+    const applyAt = (clientX: number) => {
+      const frac = Math.min(Math.max((clientX - rect.left) / rect.width, 0), 1);
+      scrubFracRef.current = frac;
+      setVideoProgress(frac);
+      setScrubTime(frac * duration);
+    };
+    applyAt(e.clientX);
+
+    const onMove = (ev: PointerEvent) => applyAt(ev.clientX);
+    const onUp = () => {
+      const v = videoRef.current;
+      if (v && Number.isFinite(v.duration) && v.duration > 0) {
+        v.currentTime = scrubFracRef.current * v.duration;
+      }
+      setScrubTime(null);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
+    const onCancel = () => {
+      setScrubTime(null);
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onCancel);
+    };
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onCancel);
   }
 
   // Bagikan Short lewat lembar berbagi bawaan perangkat (muncul di aplikasi
@@ -485,9 +579,20 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
     );
   }
 
+  const isAuthorMe = !!me && me.id === post.author.id;
+  const followingLabel =
+    followStatus === "ACCEPTED" ? "Mengikuti" : followStatus === "PENDING" ? "Diminta" : "Ikuti";
+  const fmt = (sec: number) => {
+    if (!Number.isFinite(sec) || sec < 0) sec = 0;
+    const m = Math.floor(sec / 60);
+    const s = Math.floor(sec % 60);
+    return `${m}:${s.toString().padStart(2, "0")}`;
+  };
+
   return (
     <section
       ref={sectionRef}
+      data-short={post.id}
       aria-label={`Short oleh @${post.author.username}`}
       className="relative flex h-full snap-start items-center justify-center overflow-hidden rounded-xl bg-black md:border md:border-white/10"
     >
@@ -503,18 +608,63 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
           onPlay={() => setIsPaused(false)}
           onPause={() => setIsPaused(true)}
           onLoadedData={() => setVideoReady(true)}
+          onLoadedMetadata={(e) => {
+            const d = e.currentTarget.duration;
+            setVideoDuration(Number.isFinite(d) && d > 0 ? d : 0);
+          }}
           onTimeUpdate={(e) => {
+            if (scrubTime !== null) return; // sedang menggeser — progress dikendalikan scrub
             const v = e.currentTarget;
             if (v.duration > 0) setVideoProgress(Math.min(1, v.currentTime / v.duration));
           }}
         />
 
-        {/* Bar progres video (tipis, bergaya modern) */}
-        <div className="pointer-events-none absolute inset-x-0 bottom-0 z-[2] h-[3px] bg-white/10" aria-hidden="true">
+        {/* Bar progres video — bisa digeser untuk melompat waktu */}
+        <div
+          className={cn(
+            "absolute inset-x-0 bottom-0 z-[3] touch-none",
+            "flex h-5 items-end justify-center px-0 py-0"
+          )}
+        >
+          {/* Gelembung waktu saat menggeser */}
+          {scrubTime !== null && (
+            <span
+              className="pointer-events-none absolute bottom-4 rounded-full bg-black/80 px-3 py-1 text-xs font-semibold tabular-nums text-white backdrop-blur"
+              style={{ left: `calc(${Math.min(Math.max(videoProgress, 0.06), 0.94) * 100}% - 44px)` }}
+            >
+              {fmt(scrubTime)}{videoDuration > 0 ? ` / ${fmt(videoDuration)}` : ""}
+            </span>
+          )}
           <div
-            className="h-full bg-gradient-to-r from-rose-500 to-orange-400"
-            style={{ width: `${videoProgress * 100}%` }}
-          />
+            role="slider"
+            aria-label="Posisi video"
+            tabIndex={0}
+            aria-valuemin={0}
+            aria-valuemax={Math.max(Math.round(videoDuration), 1)}
+            aria-valuenow={Math.round(videoProgress * (videoDuration || 0))}
+            aria-valuetext={videoDuration > 0 ? `${fmt(scrubTime ?? videoProgress * videoDuration)} dari ${fmt(videoDuration)}` : undefined}
+            onPointerDown={handleScrubStart}
+            onKeyDown={(e) => {
+              const video = videoRef.current;
+              if (!video || !Number.isFinite(video.duration)) return;
+              if (e.key === "ArrowRight") video.currentTime = Math.min(video.duration, video.currentTime + 5);
+              if (e.key === "ArrowLeft") video.currentTime = Math.max(0, video.currentTime - 5);
+            }}
+            className="relative flex h-5 w-full cursor-pointer items-center"
+          >
+            <div className="relative h-[3px] w-full overflow-hidden rounded-full bg-white/15">
+              <div
+                className="h-full bg-gradient-to-r from-rose-500 to-orange-400"
+                style={{ width: `${videoProgress * 100}%` }}
+                aria-hidden="true"
+              />
+            </div>
+            <div
+              className="absolute h-3.5 w-3.5 -translate-x-1/2 rounded-full bg-white shadow ring-2 ring-rose-500/70"
+              style={{ left: `${videoProgress * 100}%` }}
+              aria-hidden="true"
+            />
+          </div>
         </div>
 
         {/* Area ketuk: sekali = putar/jeda, dua kali = suka */}
@@ -571,7 +721,7 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
           )}
         </AnimatePresence>
 
-        {/* Tombol suara (bersuara default; berdenyut bila autoplay bersuara diblokir browser) */}
+        {/* Tombol suara (mengikuti preferensi global; berdenyut bila autoplay bersuara diblokir browser) */}
         <button
           type="button"
           onClick={toggleMute}
@@ -605,8 +755,8 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
           )}
         </AnimatePresence>
 
-        {/* Info pembuat + caption */}
-        <div className="absolute bottom-4 left-3 right-16 z-10">
+        {/* Info pembuat + caption + tombol ikuti */}
+        <div className="absolute bottom-6 left-3 right-16 z-10">
           <div className="flex items-center gap-2.5">
             <UserAvatarLink
               name={post.author.displayName}
@@ -622,21 +772,48 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
             >
               @{post.author.username}
             </a>
-            <span className="text-xs text-white/70 drop-shadow-sm">{timeAgo(post.createdAt)}</span>
+            {!isAuthorMe && (
+              <button
+                type="button"
+                onClick={() => onToggleFollow(post.author.username)}
+                aria-pressed={followStatus === "ACCEPTED" || followStatus === "PENDING"}
+                className={cn(
+                  "flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold backdrop-blur transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",
+                  followStatus === "ACCEPTED" || followStatus === "PENDING"
+                    ? "bg-white/15 text-white hover:bg-white/25"
+                    : "bg-gradient-to-r from-rose-500 to-orange-400 text-white hover:opacity-90"
+                )}
+              >
+                {followStatus === "ACCEPTED" ? (
+                  <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                ) : (
+                  <Plus className="h-3.5 w-3.5" aria-hidden="true" />
+                )}
+                {followingLabel}
+              </button>
+            )}
+            <span className="ml-auto shrink-0 text-xs text-white/70 drop-shadow-sm">{timeAgo(post.createdAt)}</span>
           </div>
           {post.caption && (
-            <button
-              type="button"
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => setCaptionExpanded((v) => !v)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  setCaptionExpanded((v) => !v);
+                }
+              }}
               aria-expanded={captionExpanded}
               aria-label={captionExpanded ? "Tutup caption" : "Buka caption lengkap"}
               className={cn(
                 "mt-1.5 max-w-full text-left text-sm leading-snug text-white/90 drop-shadow-sm",
-                captionExpanded ? "whitespace-pre-wrap break-words" : "line-clamp-2 break-words"
+                captionExpanded ? "break-words" : "line-clamp-2 break-words"
               )}
             >
-              {post.caption}
-            </button>
+              <RichText text={post.caption} light />
+            </div>
           )}
         </div>
 
@@ -689,6 +866,28 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
             <motion.button
               whileTap={{ scale: 0.82 }}
               type="button"
+              onClick={() => save.mutate(post.id)}
+              aria-pressed={post.savedByMe}
+              aria-label={post.savedByMe ? "Batalkan simpan" : "Simpan Short"}
+              className={cn(
+                "flex h-12 w-12 items-center justify-center rounded-full backdrop-blur transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",
+                post.savedByMe
+                  ? "bg-gradient-to-r from-rose-500 to-orange-400 shadow-[0_0_18px_rgba(244,63,94,0.35)]"
+                  : "bg-black/50 hover:bg-black/70"
+              )}
+            >
+              <Bookmark
+                className={cn("h-7 w-7 text-white drop-shadow-md", post.savedByMe && "fill-white")}
+                aria-hidden="true"
+              />
+            </motion.button>
+            <span className="text-xs font-semibold drop-shadow-md">Simpan</span>
+          </div>
+
+          <div className="flex flex-col items-center gap-1">
+            <motion.button
+              whileTap={{ scale: 0.82 }}
+              type="button"
               onClick={sharePost}
               aria-label="Bagikan Short"
               className="flex h-12 w-12 items-center justify-center rounded-full bg-black/50 backdrop-blur transition-colors hover:bg-black/70 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
@@ -714,16 +913,104 @@ function ShortItem({ post, me, onNeedLogin, nextMedia }: { post: Post; me: Me | 
 
 // ---- Tampilan utama Shorts ----
 
+type ShortsFeedMode = "foryou" | "following";
+
 export function ShortsView({ me, onNeedLogin }: { me: Me | null; onNeedLogin: () => void }) {
-  const query = useInfinitePosts({ feed: "shorts", limit: 5 });
+  const [feedMode, setFeedMode] = useState<ShortsFeedMode>("foryou");
+  const query = useInfinitePosts({ feed: feedMode === "foryou" ? "shorts" : "following", limit: 5 });
   const sentinelRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const follow = useFollow(onNeedLogin);
+
+  // Status ikut untuk penulis Short (optimistik; direkonsiliasi hasil server)
+  const [followMap, setFollowMap] = useState<Record<string, FollowStatus>>({});
 
   const { data, isLoading, isError, refetch, fetchNextPage, hasNextPage, isFetchingNextPage } = query;
-  const posts = data?.pages.flatMap((p) => p.posts) ?? [];
+  // "Mengikuti" membawa semua jenis post — ambil videonya saja untuk Shorts
+  const posts = useMemo(() => {
+    const raw = data?.pages.flatMap((p) => p.posts) ?? [];
+    return feedMode === "following" ? raw.filter((p) => p.type === "VIDEO") : raw;
+  }, [data, feedMode]);
+
+  function toggleFollow(username: string) {
+    if (!me) {
+      onNeedLogin();
+      return;
+    }
+    const cur = followMap[username] ?? "NONE";
+    const optimistic: FollowStatus = cur === "ACCEPTED" || cur === "PENDING" ? "NONE" : "ACCEPTED";
+    setFollowMap((m) => ({ ...m, [username]: optimistic }));
+    follow.mutate(username, {
+      onSuccess: (result) => {
+        const next: FollowStatus = result.pending ? "PENDING" : result.following ? "ACCEPTED" : "NONE";
+        setFollowMap((m) => ({ ...m, [username]: next }));
+      },
+      onError: () => setFollowMap((m) => ({ ...m, [username]: cur })),
+    });
+  }
+
+  // Cari elemen video dari Short yang sedang aktif (terdekat dari tengah viewport)
+  function findActiveVideo(): HTMLVideoElement | null {
+    const container = containerRef.current;
+    if (!container) return null;
+    const sections = Array.from(container.querySelectorAll<HTMLElement>("section[data-short]"));
+    if (sections.length === 0) return null;
+    const mid = container.getBoundingClientRect().top + container.clientHeight / 2;
+    let best: HTMLElement | null = null;
+    let bestDist = Infinity;
+    for (const s of sections) {
+      const r = s.getBoundingClientRect();
+      const d = Math.abs(r.top + r.height / 2 - mid);
+      if (d < bestDist) {
+        bestDist = d;
+        best = s;
+      }
+    }
+    return best?.querySelector("video") ?? null;
+  }
+
+  function scrollToShort(direction: 1 | -1) {
+    const container = containerRef.current;
+    if (!container) return;
+    container.scrollBy({ top: direction * container.clientHeight, behavior: "smooth" });
+  }
+
+  // Pintasan keyboard desktop ala TikTok web:
+  // ↓/↑ = Short berikutnya/sebelumnya, Spasi = putar/jeda, M = bisu/suara.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (e.key === "ArrowDown") {
+        e.preventDefault();
+        scrollToShort(1);
+      } else if (e.key === "ArrowUp") {
+        e.preventDefault();
+        scrollToShort(-1);
+      } else if (e.key === " ") {
+        e.preventDefault();
+        const video = findActiveVideo();
+        if (video) {
+          if (video.paused) video.play().catch(() => {});
+          else video.pause();
+        }
+      } else if (e.key === "m" || e.key === "M") {
+        useShortsSound.getState().toggle();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
 
   useEffect(() => {
     document.title = "Shorts · SkelzHub";
   }, []);
+
+  // Ganti tab: kembali ke Short pertama (scroll atas) + reset ikut-map cache lama
+  useEffect(() => {
+    const container = containerRef.current;
+    if (container) container.scrollTo({ top: 0 });
+  }, [feedMode]);
 
   // Paginasi tak berujung lewat sentinel
   useEffect(() => {
@@ -745,42 +1032,105 @@ export function ShortsView({ me, onNeedLogin }: { me: Me | null; onNeedLogin: ()
   // untuk perangkat berponi). Desktop: tinggi penuh. Snap murni tanpa
   // jarak/padding ekstra supaya tiap Short mengisi halaman penuh.
   return (
-    <div className="h-[calc(100dvh-118px-env(safe-area-inset-bottom))] w-full snap-y snap-mandatory overflow-y-auto overscroll-contain bg-black [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden md:h-[calc(100dvh-1px)] md:bg-neutral-950 md:px-4 md:py-4">
-      {isLoading && (
-        <>
-          <span className="sr-only" role="status" aria-live="polite">
-            Memuat Shorts...
-          </span>
-          <ShortSkeleton />
-          <ShortSkeleton />
-        </>
-      )}
-
-      {!isLoading && isError && <ShortsError onRetry={() => refetch()} />}
-
-      {!isLoading && !isError && posts.length === 0 && <ShortsEmpty />}
-
-      {posts.map((post, i) => (
-        <ShortItem
-          key={post.id}
-          post={post}
-          me={me}
-          onNeedLogin={onNeedLogin}
-          nextMedia={posts[i + 1]?.media}
-        />
-      ))}
-
-      {isFetchingNextPage && (
-        <div className="flex h-20 items-center justify-center" role="status" aria-label="Memuat Shorts lainnya">
-          <Loader2 className="h-6 w-6 animate-spin text-white/70" aria-hidden="true" />
+    <div className="relative">
+      <div
+        ref={containerRef}
+        className="h-[calc(100dvh-118px-env(safe-area-inset-bottom))] w-full snap-y snap-mandatory overflow-y-auto overscroll-contain bg-black [scrollbar-width:none] [-ms-overflow-style:none] [&::-webkit-scrollbar]:hidden md:h-[calc(100dvh-1px)] md:bg-neutral-950 md:px-4 md:py-4"
+      >
+        {/* Tab "Untuk kamu / Mengikuti" ala TikTok (sticky di atas) */}
+        <div className="sticky top-0 z-30 flex justify-center bg-gradient-to-b from-black/60 to-transparent pt-2 pb-2 md:from-neutral-950/80">
+          <div
+            role="tablist"
+            aria-label="Jenis feed Shorts"
+            className="flex items-center gap-1 rounded-full bg-black/45 p-1 backdrop-blur"
+          >
+            {(
+              [
+                { id: "foryou", label: "Untuk kamu" },
+                { id: "following", label: "Mengikuti" },
+              ] as const
+            ).map((tab) => (
+              <button
+                key={tab.id}
+                role="tab"
+                type="button"
+                aria-selected={feedMode === tab.id}
+                onClick={() => setFeedMode(tab.id)}
+                className={cn(
+                  "relative rounded-full px-4 py-1.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",
+                  feedMode === tab.id ? "text-white" : "text-white/60 hover:text-white/90"
+                )}
+              >
+                {feedMode === tab.id && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-full bg-gradient-to-r from-rose-500/90 to-orange-400/90"
+                  />
+                )}
+                <span className="relative">{tab.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
-      )}
 
-      {!isLoading && !isError && !hasNextPage && posts.length > 0 && (
-        <p className="py-4 text-center text-xs text-white/50">Kamu sudah menonton semua Shorts.</p>
-      )}
+        {isLoading && (
+          <>
+            <span className="sr-only" role="status" aria-live="polite">
+              Memuat Shorts...
+            </span>
+            <ShortSkeleton />
+            <ShortSkeleton />
+          </>
+        )}
 
-      <div ref={sentinelRef} className="h-2 w-full" aria-hidden="true" />
+        {!isLoading && isError && <ShortsError onRetry={() => refetch()} />}
+
+        {!isLoading && !isError && posts.length === 0 && <ShortsEmpty following={feedMode === "following"} />}
+
+        {posts.map((post, i) => (
+          <ShortItem
+            key={post.id}
+            post={post}
+            me={me}
+            onNeedLogin={onNeedLogin}
+            nextMedia={posts[i + 1]?.media}
+            followStatus={followMap[post.author.username]}
+            onToggleFollow={toggleFollow}
+          />
+        ))}
+
+        {isFetchingNextPage && (
+          <div className="flex h-20 items-center justify-center" role="status" aria-label="Memuat Shorts lainnya">
+            <Loader2 className="h-6 w-6 animate-spin text-white/70" aria-hidden="true" />
+          </div>
+        )}
+
+        {!isLoading && !isError && !hasNextPage && posts.length > 0 && (
+          <p className="py-4 text-center text-xs text-white/50">Kamu sudah menonton semua Shorts.</p>
+        )}
+
+        <div ref={sentinelRef} className="h-2 w-full" aria-hidden="true" />
+      </div>
+
+      {/* Panah navigasi desktop ala TikTok web */}
+      <div className="absolute right-5 top-1/2 z-30 hidden -translate-y-1/2 flex-col gap-3 md:flex">
+        <button
+          type="button"
+          onClick={() => scrollToShort(-1)}
+          aria-label="Short sebelumnya"
+          className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <ChevronUp className="h-6 w-6" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          onClick={() => scrollToShort(1)}
+          aria-label="Short berikutnya"
+          className="flex h-11 w-11 items-center justify-center rounded-full bg-white/10 text-white backdrop-blur transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
+        >
+          <ChevronDown className="h-6 w-6" aria-hidden="true" />
+        </button>
+      </div>
     </div>
   );
 }

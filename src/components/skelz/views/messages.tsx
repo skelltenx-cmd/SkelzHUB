@@ -60,6 +60,7 @@ import { UserAvatarLink, UserAvatarStory } from "../user-avatar";
 import { AdminBadge } from "../admin-badge";
 import { timeAgo, compressImageForChat, fileToPreviewUrl, mediaThumb } from "../utils";
 import { CameraCaptureDialog } from "../camera-capture";
+import { EmojiPickerButton } from "../emoji-picker";
 
 // ---------- Helpers ----------
 
@@ -200,6 +201,9 @@ function VoiceBubble({ src, mine }: { src: string; mine: boolean }) {
 function PhotoLightbox({ src, createdAt, onClose }: { src: string; createdAt: string; onClose: () => void }) {
   const t = useT();
   const [downloading, setDownloading] = useState(false);
+  // URL blob unduhan yang masih menunggu pencabutan tertunda (10 dtk) —
+  // dicabut segera saat lightbox ditutup supaya tidak menggantung tanpa pemilik.
+  const downloadUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -208,6 +212,18 @@ function PhotoLightbox({ src, createdAt, onClose }: { src: string; createdAt: st
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  // Timer pencabutan URL blob (10 dtk di download()) bisa lebih lama hidup
+  // dari lightbox — cabut sisa URL saat lightbox benar-benar ditutup
+  // (unmount) supaya blob tidak menggantung tanpa pemilik.
+  useEffect(() => {
+    return () => {
+      if (downloadUrlRef.current) {
+        URL.revokeObjectURL(downloadUrlRef.current);
+        downloadUrlRef.current = null;
+      }
+    };
+  }, []);
 
   let timeLabel = createdAt;
   try {
@@ -224,13 +240,19 @@ function PhotoLightbox({ src, createdAt, onClose }: { src: string; createdAt: st
       if (!res.ok) throw new Error(String(res.status));
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
+      downloadUrlRef.current = url;
       const a = document.createElement("a");
       a.href = url;
       a.download = "foto.jpg";
       document.body.appendChild(a);
       a.click();
       a.remove();
-      setTimeout(() => URL.revokeObjectURL(url), 10_000);
+      // Unduhan sudah dipicu sinkron oleh click(); cabut URL setelah jeda
+      // aman, atau lebih cepat kalau lightbox ditutup (lihat cleanup effect).
+      setTimeout(() => {
+        URL.revokeObjectURL(url);
+        if (downloadUrlRef.current === url) downloadUrlRef.current = null;
+      }, 10_000);
     } catch {
       // Gagal mem-fetch (mis. CORS) -> buka di tab baru sebagai cadangan
       window.open(src, "_blank", "noopener");
@@ -972,10 +994,22 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
   const recorderRef = useRef<MediaRecorder | null>(null);
   const voiceTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const voiceCancelledRef = useRef(false);
+  // Komponen masih terpasang? (guard onstop perekam saat unmount)
+  const mountedRef = useRef(true);
+  // Cermin previewUrl rekaman: closure cleanup unmount hanya menangkap nilai
+  // render pertama yang basi, jadi pemantauannya lewat ref.
+  const voicePreviewRef = useRef<string | null>(null);
   const typingSentAtRef = useRef(0);
   const nearBottomRef = useRef(true);
 
-  const messages = useMemo(() => query.data?.pages.flatMap((p) => p.messages) ?? [], [query.data]);
+  // Urutan render: server mengirim tiap halaman ASCENDING (blok pesan
+  // TERBARU ada di halaman 0), sedangkan fetchNextPage menambah halaman
+  // LEBIH LAMA di akhir array pages. Dibalik dulu baru di-flatMap supaya
+  // kronologi benar: tertua -> terbaru.
+  const messages = useMemo(
+    () => [...(query.data?.pages ?? [])].reverse().flatMap((p) => p.messages),
+    [query.data]
+  );
   // Cursor sinkronisasi: pesan yang berubah (baru/edit/hapus) punya updatedAt.
   // PENTING: pesan optimistik (pending / id "tmp-") TIDAK ikut dihitung —
   // jam client bisa lebih maju dari server; kalau ikut, cursor melompati
@@ -1003,18 +1037,50 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
     nearBottomRef.current = true;
   }, [conversationId]);
 
-  // Scroll ke bawah saat pesan baru / ganti percakapan (hanya kalau user
-  // sedang di dekat bawah — kalau sedang membaca ke atas, jangan menyentak)
+  // Scroll ke bawah saat pesan BARU datang di ujung bawah / ganti
+  // percakapan (hanya kalau user sedang dekat bawah — kalau sedang
+  // membaca ke atas, jangan menyentak). Deteksinya lewat id pesan
+  // TERBARU, bukan panjang daftar: "muat pesan lama" juga menambah
+  // panjang, tapi menyisipkan di ATAS — tidak boleh memicu lompatan ke
+  // bawah; titik baca user justru dijaga lewat jangkar scroll.
+  const newestIdRef = useRef<string | null>(null);
+  const loadAnchorRef = useRef<{ top: number; height: number } | null>(null);
   useEffect(() => {
-    if (nearBottomRef.current) {
-      bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    const el = scrollRef.current;
+    const newestId = messages.length > 0 ? messages[messages.length - 1].id : null;
+    if (newestId !== newestIdRef.current) {
+      newestIdRef.current = newestId;
+      loadAnchorRef.current = null;
+      if (nearBottomRef.current) {
+        bottomRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+      }
+    } else if (el && loadAnchorRef.current) {
+      // Baru saja memuat pesan lama (disisip di atas): geser scrollTop
+      // sebesar tinggi yang ditambah supaya titik baca tidak berpindah.
+      const { top, height } = loadAnchorRef.current;
+      loadAnchorRef.current = null;
+      const delta = el.scrollHeight - height;
+      if (delta > 0) el.scrollTop = top + delta;
     }
-  }, [conversationId, messages.length]);
+  }, [conversationId, messages]);
+
+  // Pemuatan pesan lama gagal/tidak membawa data -> buang jangkar basi
+  useEffect(() => {
+    if (!query.isFetchingNextPage) loadAnchorRef.current = null;
+  }, [query.isFetchingNextPage]);
 
   function handleScroll() {
     const el = scrollRef.current;
     if (!el) return;
     nearBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 120;
+  }
+
+  // ---- Muat pesan lama: catat posisi & tinggi scroll dulu supaya begitu
+  // pesan lama tersisip di atas, titik baca user tetap di tempat. ----
+  function loadOlder() {
+    const el = scrollRef.current;
+    if (el) loadAnchorRef.current = { top: el.scrollTop, height: el.scrollHeight };
+    query.fetchNextPage();
   }
 
   // ---- Polling realtime ringan (2 dtk, pause otomatis saat tab tersembunyi) ----
@@ -1042,18 +1108,23 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
         if (fresh.messages.length > 0) {
           let hasNew = false;
           qc.setQueryData<MsgCache>(["messages", conversationId], (old) => {
-            if (!old?.pages) return old;
+            if (!old?.pages?.length) return old;
             const known = new Set(old.pages.flatMap((p) => p.messages).map((m) => m.id));
             const adding = fresh.messages.filter((m) => !known.has(m.id) && !m.pending);
             const updates = fresh.messages.filter((m) => known.has(m.id));
             hasNew = adding.length > 0;
             let pages = old.pages;
             if (adding.length > 0) {
-              const lastPage = old.pages[old.pages.length - 1];
-              const patched = { ...lastPage, messages: [...lastPage.messages, ...adding] };
-              pages = [...old.pages.slice(0, -1), patched];
+              // Pesan baru menempel ke AKHIR pages[0] (blok terbaru; tiap blok
+              // ascending) — halaman terakhir justru blok TERTUA hasil
+              // "muat pesan lama", bukan tujuan pesan baru.
+              const firstPage = old.pages[0];
+              const patched = { ...firstPage, messages: [...firstPage.messages, ...adding] };
+              pages = [patched, ...old.pages.slice(1)];
             }
             if (updates.length > 0) {
+              // Pesan yang berubah (edit/hapus/reaksi/sudah-dibaca) diganti
+              // utuh berdasarkan id — data server adalah kebenaran.
               const updateMap = new Map(updates.map((m) => [m.id, m]));
               pages = pages.map((page) => ({
                 ...page,
@@ -1247,7 +1318,9 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
       };
       recorder.onstop = () => {
         stream.getTracks().forEach((track) => track.stop());
-        if (voiceCancelledRef.current) return; // dibatalkan -> buang hasil
+        // Dibatalkan ATAU komponen sudah lepas (unmount memanggil stop()):
+        // buang hasil — jangan setState pada komponen yang sudah mati.
+        if (voiceCancelledRef.current || !mountedRef.current) return;
         const blob = new Blob(chunks, { type: mime.split(";")[0] });
         if (blob.size < 512) {
           // terlalu pendek — anggap batal
@@ -1299,11 +1372,25 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
     }
   }
 
-  // Bersihkan rekaman saat keluar chat
+  // Bersihkan rekaman saat keluar chat: hentikan timer & perekam, tandai
+  // komponen lepas (dipakai guard onstop di atas), dan cabut URL blob
+  // pratinjau yang tersisa supaya tidak bocor.
   useEffect(() => {
+    voicePreviewRef.current = voice.previewUrl;
+  }, [voice.previewUrl]);
+
+  useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (voiceTimerRef.current) clearInterval(voiceTimerRef.current);
+      voiceTimerRef.current = null;
       recorderRef.current?.stop();
+      recorderRef.current = null;
+      if (voicePreviewRef.current) {
+        URL.revokeObjectURL(voicePreviewRef.current);
+        voicePreviewRef.current = null;
+      }
     };
   }, []);
 
@@ -1349,7 +1436,7 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
             </>
           ) : query.hasNextPage ? (
             <div className="pb-2 text-center">
-              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={() => query.fetchNextPage()} disabled={query.isFetchingNextPage}>
+              <Button variant="ghost" size="sm" className="text-xs text-muted-foreground" onClick={loadOlder} disabled={query.isFetchingNextPage}>
                 {query.isFetchingNextPage && <Loader2 className="h-3 w-3 animate-spin" />}
                 {t("dm.loadOlder")}
               </Button>
@@ -1508,11 +1595,18 @@ function ChatView({ conversationId, me }: { conversationId: string; me: Me | nul
           >
             <Mic className="h-5 w-5" />
           </Button>
+          {/* Pemilih emoji: tempel emoji ke draft pesan (popover sisi atas —
+              sudah bawaan komponen — jadi tidak menutup keypad mobile) */}
+          <EmojiPickerButton
+            onPick={(emoji) => setText((d) => (d ?? "") + emoji)}
+            className="shrink-0"
+            buttonClassName="h-10 w-10 border bg-background text-muted-foreground shadow-xs hover:bg-accent hover:text-accent-foreground dark:bg-input/30 dark:border-input dark:hover:bg-input/50 active:scale-90"
+          />
           <Input
             value={text}
             onChange={onType}
             placeholder={t("dm.placeholder")}
-            className="h-10 flex-1 rounded-full bg-muted/60"
+            className="h-10 min-w-0 flex-1 rounded-full bg-muted/60"
             maxLength={1000}
             aria-label={t("dm.typeMsg")}
             autoFocus

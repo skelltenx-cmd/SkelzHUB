@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { Loader2, LogIn, Mail, ShieldCheck, UserPlus, Zap, CheckCircle2, ArrowLeft, KeyRound } from "lucide-react";
+import { Loader2, LogIn, Mail, ShieldCheck, UserPlus, Zap, CheckCircle2, ArrowLeft, KeyRound, Eye, EyeOff } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -11,6 +11,52 @@ import { api } from "@/lib/api";
 import { useT } from "@/lib/i18n";
 import { useLogin, useLoginVerify, useRegister } from "../hooks";
 import { SkelzLogo } from "../logo";
+
+/** Input password dengan tombol mata — toggle terlihat/tersembunyi.
+ *  aria-label jelas supaya pembaca layar tahu fungsinya. */
+function PasswordInput({
+  id,
+  value,
+  onChange,
+  placeholder,
+  autoComplete,
+  required,
+  minLength,
+}: {
+  id: string;
+  value: string;
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  placeholder?: string;
+  autoComplete?: string;
+  required?: boolean;
+  minLength?: number;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative">
+      <Input
+        id={id}
+        type={show ? "text" : "password"}
+        value={value}
+        onChange={onChange}
+        placeholder={placeholder}
+        autoComplete={autoComplete}
+        required={required}
+        minLength={minLength}
+        className="pr-11"
+      />
+      <button
+        type="button"
+        onClick={() => setShow((s) => !s)}
+        aria-label={show ? `Sembunyikan ${placeholder ?? "password"}` : `Tampilkan ${placeholder ?? "password"}`}
+        aria-pressed={show}
+        className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {show ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+      </button>
+    </div>
+  );
+}
 
 function Feature() {
   const t = useT();
@@ -142,11 +188,11 @@ function ForgotPasswordDialog({ onClose }: { onClose: () => void }) {
             </div>
             <div className="space-y-2">
               <Label htmlFor="fp-pass">{t("a.forgotNewPass")}</Label>
-              <Input
+              <PasswordInput
                 id="fp-pass"
-                type="password"
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
+                placeholder={t("a.newPasswordPh")}
                 autoComplete="new-password"
                 required
                 minLength={6}
@@ -172,6 +218,7 @@ export function AuthView({ mode }: { mode: "login" | "register" }) {
   const t = useT();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
   const [displayName, setDisplayName] = useState("");
   const [email, setEmail] = useState("");
   const [forgotOpen, setForgotOpen] = useState(false);
@@ -241,7 +288,7 @@ export function AuthView({ mode }: { mode: "login" | "register" }) {
 
   function handleRegister(e: React.FormEvent) {
     e.preventDefault();
-    if (!username.trim() || password.length < 6) return;
+    if (!username.trim() || password.length < 6 || password !== confirmPassword) return;
     register.mutate({ username: username.trim(), displayName: displayName.trim(), email: email.trim().toLowerCase(), password });
   }
 
@@ -348,9 +395,8 @@ export function AuthView({ mode }: { mode: "login" | "register" }) {
               </div>
               <div className="space-y-2">
                 <Label htmlFor="login-password">{t("a.password")}</Label>
-                <Input
+                <PasswordInput
                   id="login-password"
-                  type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   placeholder={t("a.passwordPh")}
@@ -425,9 +471,8 @@ export function AuthView({ mode }: { mode: "login" | "register" }) {
             </div>
             <div className="space-y-2">
               <Label htmlFor="reg-password">{t("a.password")}</Label>
-              <Input
+              <PasswordInput
                 id="reg-password"
-                type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 placeholder={t("a.newPasswordPh")}
@@ -436,10 +481,25 @@ export function AuthView({ mode }: { mode: "login" | "register" }) {
                 minLength={6}
               />
             </div>
+            <div className="space-y-2">
+              <Label htmlFor="reg-confirm">Konfirmasi password</Label>
+              <PasswordInput
+                id="reg-confirm"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder={t("a.newPasswordPh")}
+                autoComplete="new-password"
+                required
+                minLength={6}
+              />
+              {confirmPassword.length > 0 && confirmPassword !== password && (
+                <p className="text-xs text-destructive">Konfirmasi belum sama dengan password di atas.</p>
+              )}
+            </div>
             <Button
               type="submit"
               className="w-full bg-gradient-to-r from-rose-500 to-orange-400 text-white hover:opacity-90"
-              disabled={register.isPending || !username.trim() || !email.trim() || password.length < 6}
+              disabled={register.isPending || !username.trim() || !email.trim() || password.length < 6 || confirmPassword !== password}
             >
               {register.isPending && <Loader2 className="h-4 w-4 animate-spin" />} {t("a.createAccount")}
             </Button>

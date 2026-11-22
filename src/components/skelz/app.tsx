@@ -115,7 +115,7 @@ export default function App() {
       content = <FeedView me={me} meLoading={meQuery.isLoading} onNeedLogin={handleNeedLogin} />;
       break;
     case "explore":
-      content = <ExploreView me={me} onNeedLogin={handleNeedLogin} />;
+      content = <ExploreView me={me} onNeedLogin={handleNeedLogin} initialQuery={route.q} />;
       break;
     case "shorts":
       content = <ShortsView me={me} onNeedLogin={handleNeedLogin} />;

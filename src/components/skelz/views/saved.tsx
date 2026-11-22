@@ -2,11 +2,11 @@
 
 import { useEffect } from "react";
 import { Bookmark, LogIn } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { Me } from "@/lib/types";
 import { useInfinitePosts } from "../hooks";
 import { PostGrid } from "../post-grid";
+import { EmptyState } from "../empty-state";
 
 export function SavedView({ me, meLoading }: { me: Me | null; meLoading: boolean }) {
   const query = useInfinitePosts({ feed: "saved", limit: 18, enabled: !!me && !meLoading });
@@ -18,13 +18,13 @@ export function SavedView({ me, meLoading }: { me: Me | null; meLoading: boolean
 
   if (!meLoading && !me) {
     return (
-      <div className="mx-auto flex max-w-md flex-col items-center gap-3 rounded-xl border bg-card p-8 text-center">
-        <LogIn className="h-10 w-10 text-muted-foreground" />
-        <h1 className="text-lg font-bold">Login untuk melihat post tersimpan</h1>
-        <p className="text-sm text-muted-foreground">Simpan post favoritmu dan nikmati kapan saja.</p>
-        <a href="#/login">
-          <Button className="bg-gradient-to-r from-rose-500 to-orange-400 text-white hover:opacity-90">Masuk</Button>
-        </a>
+      <div className="mx-auto max-w-md px-3 py-8 sm:px-4">
+        <EmptyState
+          icon={LogIn}
+          title="Login untuk melihat post tersimpan"
+          subtitle="Simpan post favoritmu dan nikmati kapan saja."
+          action={{ label: "Masuk", href: "#/login" }}
+        />
       </div>
     );
   }
@@ -45,14 +45,12 @@ export function SavedView({ me, meLoading }: { me: Me | null; meLoading: boolean
       )}
 
       {!query.isLoading && posts.length === 0 && (
-        <div className="flex flex-col items-center gap-2 rounded-xl border bg-card p-10 text-center">
-          <Bookmark className="h-10 w-10 text-muted-foreground" />
-          <p className="font-semibold">Belum ada post tersimpan</p>
-          <p className="text-sm text-muted-foreground">Tekan ikon bookmark pada post untuk menyimpannya di sini.</p>
-          <a href="#/explore" className="mt-2">
-            <Button variant="outline">Jelajahi post</Button>
-          </a>
-        </div>
+        <EmptyState
+          icon={Bookmark}
+          title="Belum ada yang disimpan"
+          subtitle="Tekan ikon bookmark pada post untuk menyimpannya di sini."
+          action={{ label: "Jelajahi post", href: "#/explore" }}
+        />
       )}
 
       {posts.length > 0 && <PostGrid posts={posts} />}

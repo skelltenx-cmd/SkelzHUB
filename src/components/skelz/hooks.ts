@@ -111,6 +111,12 @@ export function useLike(onNeedLogin: () => void) {
     },
     onError: (err: unknown, postId) => {
       if ((err as Error).message === "LOGIN_REQUIRED") return;
+      // Balikkan update optimistik (flip = involutif: dibalik lagi = asli)
+      mapPostEverywhere(qc, postId, (p) => ({
+        ...p,
+        likedByMe: !p.likedByMe,
+        likeCount: p.likeCount + (p.likedByMe ? 1 : -1),
+      }));
       toast({ title: "Gagal menyukai post", description: (err as Error).message });
     },
     onSettled: (_r, _e, postId) => {
@@ -139,6 +145,8 @@ export function useSave(onNeedLogin: () => void) {
     },
     onError: (err: unknown, postId) => {
       if ((err as Error).message === "LOGIN_REQUIRED") return;
+      // Balikkan update optimistik (flip = involutif: dibalik lagi = asli)
+      mapPostEverywhere(qc, postId, (p) => ({ ...p, savedByMe: !p.savedByMe }));
       toast({ title: "Gagal menyimpan post", description: (err as Error).message });
     },
   });
@@ -459,7 +467,11 @@ function dropMessage(
   });
 }
 
-/** Tempel pesan baru ke akhir cache (halaman terakhir).
+/** Tempel pesan baru ke blok PESAN TERBARU (pages[0]) di AKHIR blok itu.
+ *  Server menyusun tiap halaman ascending dan halaman 0 memuat pesan
+ *  terbaru, sedangkan halaman-halaman lebih LAMA (hasil fetchNextPage)
+ *  menempel di belakang array pages — jadi pesan baru HARUS masuk ujung
+ *  pages[0], bukan halaman terakhir (blok tertua).
  *  Idempoten: pesan yang id-nya sudah ada di cache dilewati — menghindari
  *  duplikat saat polling menempel pesan yang sama sesaat sebelum mutation
  *  kirim menyelesaikan diri. */
@@ -474,9 +486,9 @@ function appendMessages(
     const known = new Set(old.pages.flatMap((p) => p.messages).map((m) => m.id));
     const adding = incoming.filter((m) => !known.has(m.id));
     if (adding.length === 0) return old;
-    const lastPage = old.pages[old.pages.length - 1];
-    const patched = { ...lastPage, messages: [...lastPage.messages, ...adding] };
-    return { ...old, pages: [...old.pages.slice(0, -1), patched] };
+    const firstPage = old.pages[0];
+    const patched = { ...firstPage, messages: [...firstPage.messages, ...adding] };
+    return { ...old, pages: [patched, ...old.pages.slice(1)] };
   });
 }
 

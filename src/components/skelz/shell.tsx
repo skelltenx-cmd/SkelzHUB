@@ -18,8 +18,10 @@ import {
   Search,
   ShieldCheck,
   MessageCircle,
+  Settings2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { useT } from "@/lib/i18n";
 import type { Me } from "@/lib/types";
@@ -59,6 +61,36 @@ function NotifDot({ count }: { count: number }) {
     >
       {count > 99 ? "99+" : count}
     </span>
+  );
+}
+
+/** Tooltip navigasi untuk mode ikon-saja (md–xl).
+ *  Di xl label item sudah tampil, jadi tooltip disembunyikan lewat CSS. */
+function NavTooltip({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <Tooltip delayDuration={150}>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent side="right" className="font-medium xl:hidden">{label}</TooltipContent>
+    </Tooltip>
+  );
+}
+
+/** Kelas dasar item sidebar — dipakai nav utama, Pengaturan, dan keluar/masuk. */
+function sideLinkClass(active: boolean) {
+  return cn(
+    "relative flex items-center gap-4 rounded-xl px-3 py-3 text-sm font-medium transition-colors hover:bg-accent",
+    // Item aktif: pill latar gradient lembut + teks tebal
+    active && "bg-gradient-to-r from-rose-500/15 to-orange-400/15 font-semibold"
+  );
+}
+
+/** Bar gradient 3px di sisi kiri — hanya untuk mode ringkas (md–xl). */
+function ActiveBar() {
+  return (
+    <span
+      aria-hidden="true"
+      className="absolute left-0 top-1/2 hidden h-7 w-[3px] -translate-y-1/2 rounded-full bg-gradient-to-b from-rose-500 to-orange-400 md:block xl:hidden"
+    />
   );
 }
 
@@ -169,44 +201,65 @@ function DesktopSidebar({ route, me }: { route: Route; me: Me | null }) {
       </a>
       <nav className="flex flex-1 flex-col gap-1" aria-label="Navigasi utama">
         {items.map((item) => (
-          <a
-            key={item.label}
-            href={item.href}
-            aria-current={item.active ? "page" : undefined}
-            title={item.label}
-            className={cn(
-              "flex items-center gap-4 rounded-xl px-3 py-3 text-sm font-medium transition-colors hover:bg-accent",
-              item.active && "bg-accent font-semibold"
-            )}
-          >
-            {/* Ikon: mode ringkas (md–xl) diberi aksen rose saat aktif */}
-            <span className={cn("shrink-0 [&>svg]:h-6 [&>svg]:w-6", item.active && "md:text-rose-500")}>{item.icon}</span>
-            <span className="hidden xl:inline">{item.label}</span>
-            {item.badge ? (
-              <span className="ml-auto hidden h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white xl:flex">
-                {item.badge > 99 ? "99+" : item.badge}
-              </span>
-            ) : null}
-            {/* Titik aksi kecil untuk mode ringkas (md–xl) — disembunyikan saat melebar */}
-            {item.active && <span className="hidden h-1.5 w-1.5 rounded-full bg-rose-500 md:block xl:hidden" />}
-          </a>
+          <NavTooltip key={item.label} label={item.label}>
+            <a
+              href={item.href}
+              aria-current={item.active ? "page" : undefined}
+              aria-label={item.label}
+              className={sideLinkClass(item.active)}
+            >
+              {item.active && <ActiveBar />}
+              {/* Ikon: aktif diberi aksen rose di semua mode sidebar */}
+              <span className={cn("shrink-0 [&>svg]:h-6 [&>svg]:w-6", item.active && "text-rose-500")}>{item.icon}</span>
+              <span className="hidden xl:inline">{item.label}</span>
+              {item.badge ? (
+                <span className="ml-auto hidden h-4 min-w-4 items-center justify-center rounded-full bg-rose-500 px-1 text-[10px] font-bold text-white xl:flex">
+                  {item.badge > 99 ? "99+" : item.badge}
+                </span>
+              ) : null}
+            </a>
+          </NavTooltip>
         ))}
-        {me ? (
-          <button
-            onClick={() => logout.mutate()}
-            className="flex items-center gap-4 rounded-xl px-3 py-3 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
-          >
-            <LogOut className="h-6 w-6" />
-            <span className="hidden xl:inline">{t("nav.logout")}</span>
-          </button>
-        ) : (
+
+        {/* Pengaturan: di bawah nav utama, sebelum aksi akun */}
+        <NavTooltip label={t("nav.settings")}>
           <a
-            href="#/login"
-            className="flex items-center gap-4 rounded-xl px-3 py-3 text-sm font-medium transition-colors hover:bg-accent"
+            href="#/settings"
+            aria-current={route.view === "settings" ? "page" : undefined}
+            aria-label={t("nav.settings")}
+            className={cn(sideLinkClass(route.view === "settings"), "mt-2")}
           >
-            <Zap className="h-6 w-6" />
-            <span className="hidden xl:inline">{t("nav.login")}</span>
+            {route.view === "settings" && <ActiveBar />}
+            <span
+              className={cn(
+                "shrink-0 [&>svg]:h-6 [&>svg]:w-6",
+                route.view === "settings" && "text-rose-500"
+              )}
+            >
+              <Settings2 className="h-6 w-6" />
+            </span>
+            <span className="hidden xl:inline">{t("nav.settings")}</span>
           </a>
+        </NavTooltip>
+
+        {me ? (
+          <NavTooltip label={t("nav.logout")}>
+            <button
+              onClick={() => logout.mutate()}
+              className={cn(sideLinkClass(false), "text-muted-foreground hover:text-foreground")}
+              aria-label={t("nav.logout")}
+            >
+              <LogOut className="h-6 w-6" />
+              <span className="hidden xl:inline">{t("nav.logout")}</span>
+            </button>
+          </NavTooltip>
+        ) : (
+          <NavTooltip label={t("nav.login")}>
+            <a href="#/login" aria-label={t("nav.login")} className={sideLinkClass(false)}>
+              <Zap className="h-6 w-6" />
+              <span className="hidden xl:inline">{t("nav.login")}</span>
+            </a>
+          </NavTooltip>
         )}
       </nav>
       <div className="hidden px-3 pb-2 xl:block">
@@ -431,21 +484,24 @@ export function Shell({
 }) {
   // Shorts & pesan penuh layar: tanpa footer supaya layout chat murni (dua kolom di desktop)
   const immersive = route.view === "shorts" || route.view === "chat" || route.view === "messages";
+  // Provider tooltip dipasang sekali di root shell — semua NavTooltip memakainya
   return (
-    <div className="min-h-screen flex flex-col bg-background">
-      <MobileHeader me={me} />
-      <div className="flex flex-1 w-full">
-        <DesktopSidebar route={route} me={me} />
-        {/* Rute imersif mengatur tinggi sendiri (100dvh - header - nav) —
-            padding cadangan untuk nav bawah justru bikin ada kolom kosong
-            60px di atas nav (bingkai "tidak pas" di ponsel). */}
-        <div className={cn("flex min-w-0 flex-1 flex-col", immersive ? "pb-0" : "pb-[60px] md:pb-0")}>
-          <main className="flex-1">{children}</main>
-          {!immersive && <Footer />}
+    <TooltipProvider delayDuration={150}>
+      <div className="min-h-screen flex flex-col bg-background">
+        <MobileHeader me={me} />
+        <div className="flex flex-1 w-full">
+          <DesktopSidebar route={route} me={me} />
+          {/* Rute imersif mengatur tinggi sendiri (100dvh - header - nav) —
+              padding cadangan untuk nav bawah justru bikin ada kolom kosong
+              60px di atas nav (bingkai "tidak pas" di ponsel). */}
+          <div className={cn("flex min-w-0 flex-1 flex-col", immersive ? "pb-0" : "pb-[60px] md:pb-0")}>
+            <main className="flex-1">{children}</main>
+            {!immersive && <Footer />}
+          </div>
+          {showRail && !immersive && <RightRail me={me} onNeedLogin={onNeedLogin} />}
         </div>
-        {showRail && !immersive && <RightRail me={me} onNeedLogin={onNeedLogin} />}
+        <BottomNav route={route} me={me} />
       </div>
-      <BottomNav route={route} me={me} />
-    </div>
+    </TooltipProvider>
   );
 }

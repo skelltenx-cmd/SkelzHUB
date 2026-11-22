@@ -1,11 +1,21 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Heart, MessageCircle, Bookmark, MoreHorizontal, Trash2, Link2, Send, Flag, Repeat2, Pencil, Share2, Volume2, VolumeX } from "lucide-react";
+import { Heart, MessageCircle, Bookmark, MoreHorizontal, Trash2, Link2, Send, Flag, Repeat2, Pencil, Share2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Textarea } from "@/components/ui/textarea";
 import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { toast } from "@/hooks/use-toast";
@@ -15,6 +25,9 @@ import type { Post, Comment, Me } from "@/lib/types";
 import { useLike, useSave, useAddComment, useDeletePost, useEditPost, useReportPost, useRepost, useQuoteRepost } from "./hooks";
 import { UserAvatarLink, UserAvatar } from "./user-avatar";
 import { AdminBadge } from "./admin-badge";
+import { SkelzVideo } from "./video-player";
+import { RichText } from "./richtext";
+import { EmojiPickerButton } from "./emoji-picker";
 import { formatCount, timeAgo, mediaThumb } from "./utils";
 
 type Props = {
@@ -35,6 +48,8 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
   const quoteRepost = useQuoteRepost(() => void 0);
 
   const [heartBurst, setHeartBurst] = useState(false);
+  // Posisi (persen) tempat animasi hati muncul — di titik ketukan ganda
+  const [heartAt, setHeartAt] = useState<{ x: number; y: number } | null>(null);
   const [commentText, setCommentText] = useState("");
   const [localComments, setLocalComments] = useState<Comment[]>([]);
   const [reportOpen, setReportOpen] = useState(false);
@@ -43,12 +58,8 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
   const [reportReason, setReportReason] = useState("");
   const [editOpen, setEditOpen] = useState(false);
   const [editText, setEditText] = useState("");
-
-  // Video post: putar otomatis setelah termuat, mulai BISU (browser selalu
-  // mengizinkannya) + tombol suara yang jelas terlihat untuk menyalakan.
-  const videoRef = useRef<HTMLVideoElement | null>(null);
-  const [soundOn, setSoundOn] = useState(false);
-  const [soundBlocked, setSoundBlocked] = useState(false);
+  // Konfirmasi hapus — post tidak boleh hilang karena salah ketuk
+  const [deleteOpen, setDeleteOpen] = useState(false);
 
   const original = post.repostOf ?? null;
   // Repost: interaksi & identitas visual memakai post ASLI
@@ -59,51 +70,18 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
   const canRepost = !!me && !isMine;
   const canEdit = isMine || isAdmin;
 
-  // Autoplay video post — mulai BISU begitu data siap (autoplay bisu selalu
-  // diizinkan browser, jadi tidak ada "kedip gagal" bersuara → bisu di awal
-  // tampilan). Suara dinyalakan lewat tombol suara (satu ketukan, langsung).
-  useEffect(() => {
-    if (!isVideo) return;
-    const v = videoRef.current;
-    if (!v) return;
-    let cancelled = false;
-    const attempt = () => {
-      if (cancelled) return;
-      v.muted = true;
-      setSoundOn(false);
-      setSoundBlocked(true);
-      v.play().catch(() => {});
-    };
-    if (v.readyState >= 1) attempt();
-    else v.addEventListener("loadeddata", attempt, { once: true });
-    return () => {
-      cancelled = true;
-      v.removeEventListener("loadeddata", attempt);
-      try {
-        v.pause();
-      } catch {
-        /* video sudah dilepas */
-      }
-    };
-  }, [isVideo, eff.media]);
-
-  function toggleVideoSound() {
-    const v = videoRef.current;
-    if (!v) return;
-    const next = !v.muted;
-    v.muted = next;
-    setSoundOn(!next);
-    if (!next) setSoundBlocked(false);
-  }
-
   function handleLike() {
     like.mutate(post.id);
   }
 
-  function handleDoubleTapLike() {
+  function handleDoubleTapLike(pos?: { x: number; y: number }) {
     if (!eff.likedByMe) like.mutate(post.id);
+    setHeartAt(pos ?? { x: 50, y: 50 });
     setHeartBurst(true);
-    setTimeout(() => setHeartBurst(false), 700);
+    setTimeout(() => {
+      setHeartBurst(false);
+      setHeartAt(null);
+    }, 700);
   }
 
   function handleSave() {
@@ -114,7 +92,7 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
     const url = `${window.location.origin}${window.location.pathname}#/post/${post.id}`;
     navigator.clipboard?.writeText(url).then(
       () => toast({ title: t("pc.linkCopied") }),
-      () => toast({ title: t("pc.linkCopied") })
+      () => toast({ title: "Tidak bisa menyalin link" })
     );
   }
 
@@ -193,19 +171,21 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
       return;
     }
     setCommentText("");
+    const localId = `local-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
     setLocalComments((prev) => [
       ...prev,
       {
-        id: `local-${Date.now()}`,
+        id: localId,
         text,
         createdAt: new Date().toISOString(),
         author: { id: me.id, username: me.username, displayName: me.displayName, avatarColor: me.avatarColor, avatar: me.avatar },
       },
     ]);
-    addComment.mutate(
-      { postId: post.id, text },
-      { onError: () => setLocalComments((prev) => prev.filter((c) => c.text !== text || !c.id.startsWith("local"))) }
-    );
+    addComment.mutate({ postId: post.id, text }, {
+      // Gagal kirim: buang HANYA komentar lokal yang ini (id unik),
+      // bukan semua komentar lokal yang teksnya sama.
+      onError: () => setLocalComments((prev) => prev.filter((c) => c.id !== localId)),
+    });
   }
 
   const previewComments = [...(eff.previewComments ?? []), ...localComments].slice(0, 3);
@@ -280,7 +260,7 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
             {(isMine || isAdmin) && (
               <DropdownMenuItem
                 className="text-destructive focus:text-destructive"
-                onClick={() => deletePost.mutate(post.id)}
+                onClick={() => setDeleteOpen(true)}
               >
                 <Trash2 className="h-4 w-4" /> {t("pc.deletePost")}{isAdmin && !isMine ? t("pc.deleteAdmin") : ""}
               </DropdownMenuItem>
@@ -311,35 +291,29 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
         </div>
       )}
 
-      {/* Media (gambar / video) dengan double-tap like */}
-      <div className="relative select-none bg-black" onDoubleClick={handleDoubleTapLike}>
+      {/* Media (gambar / video) dengan double-tap like di titik ketukan */}
+      <div
+        className="relative select-none bg-black"
+        onDoubleClick={(e) => {
+          const r = e.currentTarget.getBoundingClientRect();
+          handleDoubleTapLike({
+            x: ((e.clientX - r.left) / r.width) * 100,
+            y: ((e.clientY - r.top) / r.height) * 100,
+          });
+        }}
+      >
         {isVideo ? (
-          <>
-            <video
-              ref={videoRef}
-              src={eff.media ?? undefined}
-              controls
-              loop
-              playsInline
-              preload="metadata"
-              className="aspect-square w-full bg-black object-contain"
-              aria-label={`Video oleh ${eff.author.username}`}
-            />
-            {/* Tombol suara: nyala kalau autoplay bersuara berhasil. Kalau
-                browser memblokir, tanda bisu KE CIL tenang (tanpa kedip)
-                supaya tetap terlihat tapi tidak mengganggu. */}
-            <button
-              type="button"
-              onClick={toggleVideoSound}
-              aria-label={soundOn ? "Bisukan video" : t("pc.turnOnSound")}
-              className={cn(
-                "absolute right-2.5 top-2.5 z-10 flex h-9 w-9 items-center justify-center rounded-full bg-black/55 text-white backdrop-blur transition-colors hover:bg-black/75 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70",
-                soundBlocked && !soundOn && "ring-1 ring-rose-400/80"
-              )}
-            >
-              {soundOn ? <Volume2 className="h-4.5 w-4.5" /> : <VolumeX className="h-4.5 w-4.5" />}
-            </button>
-          </>
+          // Pemutar custom bergaya SkelzHub (kontrol rapi, autoplay bisu saat
+          // terlihat ≥50% — video di luar layar berhenti, hemat kuota),
+          // ketuk ganda pada video = suka di titik ketukan.
+          <SkelzVideo
+            src={eff.media ?? ""}
+            className="aspect-square w-full"
+            videoClassName="h-full w-full object-contain"
+            loop
+            onDoubleTap={handleDoubleTapLike}
+            ariaLabel={`Video oleh ${eff.author.username}`}
+          />
         ) : (
           <img
             src={mediaThumb(eff.media, 720) ?? undefined}
@@ -357,9 +331,10 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
               animate={{ scale: [0, 1.15, 1], opacity: [0, 1, 1] }}
               exit={{ scale: 1.4, opacity: 0 }}
               transition={{ duration: 0.55 }}
-              className="pointer-events-none absolute inset-0 flex items-center justify-center"
+              className="pointer-events-none absolute z-20 flex h-0 w-0 items-center justify-center"
+              style={heartAt ? { left: `${heartAt.x}%`, top: `${heartAt.y}%` } : { left: "50%", top: "50%" }}
             >
-              <Heart className="h-24 w-24 fill-rose-500 text-rose-500 drop-shadow-lg" aria-hidden="true" />
+              <Heart className="h-24 w-24 -translate-x-1/2 -translate-y-1/2 fill-rose-500 text-rose-500 drop-shadow-lg" aria-hidden="true" />
             </motion.div>
           )}
         </AnimatePresence>
@@ -428,7 +403,7 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
             <a href={`#/u/${encodeURIComponent(eff.author.username)}`} className="font-semibold hover:underline">
               {eff.author.username}
             </a>{" "}
-            {eff.caption}
+            <RichText text={eff.caption} className="leading-snug" />
           </p>
         )}
         {original && !post.caption && original.caption && (
@@ -436,7 +411,7 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
             <a href={`#/u/${encodeURIComponent(original.author.username)}`} className="font-semibold hover:underline">
               {original.author.username}
             </a>{" "}
-            {original.caption}
+            <RichText text={original.caption} className="leading-snug" />
           </p>
         )}
 
@@ -465,8 +440,9 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
         ))}
       </div>
 
-      {/* Input komentar */}
-      <form onSubmit={submitComment} className="flex items-center gap-2 border-t px-3 py-2 sm:px-4">
+      {/* Input komentar (dengan pemilih emoji) */}
+      <form onSubmit={submitComment} className="flex items-center gap-1.5 border-t px-3 py-2 sm:px-4">
+        <EmojiPickerButton onPick={(emoji) => setCommentText((prev) => (prev ?? "") + emoji)} className="shrink-0" />
         <Input
           value={commentText}
           onChange={(e) => setCommentText(e.target.value)}
@@ -486,6 +462,32 @@ export function PostCard({ post, me, onNeedLogin }: Props) {
           <Send className="h-5 w-5" />
         </Button>
       </form>
+
+      {/* Konfirmasi hapus post — tidak lagi langsung terhapus karena salah ketuk */}
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>{t("pc.deletePost")}{isAdmin && !isMine ? t("pc.deleteAdmin") : ""}</AlertDialogTitle>
+            <AlertDialogDescription>
+              Tindakan ini tidak bisa dibatalkan. Post beserta komentar di dalamnya akan dihapus permanen.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletePost.isPending}>{t("c.cancel")}</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletePost.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                deletePost.mutate(post.id);
+                setDeleteOpen(false);
+              }}
+            >
+              {deletePost.isPending ? "Menghapus..." : "Hapus"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Dialog kutip repost */}
       <Dialog open={quoteOpen} onOpenChange={setQuoteOpen}>

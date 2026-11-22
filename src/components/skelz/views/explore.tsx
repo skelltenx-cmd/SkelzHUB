@@ -1,7 +1,7 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { Search, Compass, Loader2, UserRound, Clapperboard, ImageOff, Users, X } from "lucide-react";
+import { useEffect, useRef, useState, useSyncExternalStore } from "react";
+import { Search, Compass, Loader2, Clapperboard, ImageOff, Users, X, History, Trash2, SearchX } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -11,6 +11,7 @@ import type { Me, Post, User } from "@/lib/types";
 import { useInfinitePosts, useSearchAll, useFollow } from "../hooks";
 import { PostTile } from "../post-grid";
 import { UserAvatarLink } from "../user-avatar";
+import { EmptyState } from "../empty-state";
 import { formatCount } from "../utils";
 
 type SearchTab = "all" | "accounts" | "posts" | "videos";
@@ -21,6 +22,58 @@ const TABS: { key: SearchTab; label: string }[] = [
   { key: "posts", label: "search.tabPosts" },
   { key: "videos", label: "search.tabVideos" },
 ];
+
+// ---------- Riwayat pencarian (localStorage) ----------
+
+const RECENT_KEY = "skelz-recent-search";
+const RECENT_MAX = 8;
+const RECENT_TERM_MAX = 60;
+const EMPTY_RECENTS: string[] = [];
+
+function loadRecentSearches(): string[] {
+  try {
+    const raw = localStorage.getItem(RECENT_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === "string").slice(0, RECENT_MAX);
+  } catch {
+    return [];
+  }
+}
+
+function persistRecentSearches(list: string[]) {
+  try {
+    localStorage.setItem(RECENT_KEY, JSON.stringify(list));
+  } catch {
+    // mode privat / storage penuh — fitur tetap jalan tanpa riwayat tersimpan
+  }
+}
+
+// Store eksternal mini (pola useSyncExternalStore): baca localStorage tanpa
+// setState-in-effect & tanpa mismatch hidrasi (snapshot server = kosong).
+let recentSnapshot: string[] | null = null;
+const recentListeners = new Set<() => void>();
+
+function getRecentSnapshot(): string[] {
+  if (recentSnapshot === null) recentSnapshot = loadRecentSearches();
+  return recentSnapshot;
+}
+
+function getRecentServerSnapshot(): string[] {
+  return EMPTY_RECENTS;
+}
+
+function subscribeRecents(onChange: () => void): () => void {
+  recentListeners.add(onChange);
+  return () => recentListeners.delete(onChange);
+}
+
+function setRecentSearches(next: string[]) {
+  recentSnapshot = next;
+  persistRecentSearches(next);
+  recentListeners.forEach((l) => l());
+}
 
 /** Baris hasil akun — dipakai di tab Semua & Akun */
 function AccountRow({ u, me, follow, t }: { u: User; me: Me | null; follow: ReturnType<typeof useFollow>; t: ReturnType<typeof useT> }) {
@@ -58,14 +111,22 @@ function AccountRow({ u, me, follow, t }: { u: User; me: Me | null; follow: Retu
 export function ExploreView({
   me,
   onNeedLogin,
+  initialQuery,
 }: {
   me: Me | null;
   onNeedLogin: () => void;
+  /** Deep-link #/explore?q=... — langsung diisikan ke kotak pencarian */
+  initialQuery?: string;
 }) {
   const t = useT();
-  const [rawSearch, setRawSearch] = useState("");
-  const [search, setSearch] = useState("");
+  // Deep-link hashtag (#/explore?q=...) dipakai sebagai nilai AWAL pencarian
+  // (view selalu di-remount oleh router saat berpindah halaman, jadi nilai
+  // awal ini ikut kata kunci terbaru setiap masuk dari luar halaman ini).
+  const initialQ = initialQuery?.trim().slice(0, RECENT_TERM_MAX) ?? "";
+  const [rawSearch, setRawSearch] = useState(initialQ);
+  const [search, setSearch] = useState(initialQ);
   const [tab, setTab] = useState<SearchTab>("all");
+  const recents = useSyncExternalStore(subscribeRecents, getRecentSnapshot, getRecentServerSnapshot);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // debounce pencarian 350ms (terasa responsif tanpa membombardir server)
@@ -73,6 +134,27 @@ export function ExploreView({
     const timer = setTimeout(() => setSearch(rawSearch.trim()), 350);
     return () => clearTimeout(timer);
   }, [rawSearch]);
+
+  function pushRecent(term: string) {
+    const value = term.trim().slice(0, RECENT_TERM_MAX);
+    if (!value) return;
+    // dedupe: term lama dinaikkan ke depan, maksimal 8 item
+    setRecentSearches([value, ...recents.filter((x) => x !== value)].slice(0, RECENT_MAX));
+  }
+
+  function removeRecent(term: string) {
+    setRecentSearches(recents.filter((x) => x !== term));
+  }
+
+  function clearRecents() {
+    setRecentSearches([]);
+  }
+
+  function applyRecent(term: string) {
+    setRawSearch(term);
+    setSearch(term);
+    inputRef.current?.focus();
+  }
 
   const searching = search.length > 0;
   const searchQuery = useSearchAll(search.toLowerCase());
@@ -128,6 +210,10 @@ export function ExploreView({
             ref={inputRef}
             value={rawSearch}
             onChange={(e) => setRawSearch(e.target.value)}
+            onKeyDown={(e) => {
+              // Enter = submit pencarian -> simpan ke riwayat terakhir dicari
+              if (e.key === "Enter") pushRecent(rawSearch);
+            }}
             placeholder={t("search.placeholder")}
             className="h-11 rounded-full bg-muted/70 pl-11 pr-11"
             aria-label={t("search.placeholder")}
@@ -163,6 +249,50 @@ export function ExploreView({
             <Compass className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
             {t("search.hint")}
           </p>
+        )}
+
+        {/* Riwayat pencarian — chip muncul saat kotak pencarian kosong */}
+        {!searching && recents.length > 0 && (
+          <div className="animate-fade-in-up">
+            <div className="mb-1.5 flex items-center justify-between gap-2">
+              <p className="flex items-center gap-1.5 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <History className="h-3.5 w-3.5" aria-hidden="true" /> Terakhir dicari
+              </p>
+              <button
+                type="button"
+                onClick={clearRecents}
+                className="flex items-center gap-1 rounded-full px-2 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                aria-label="Hapus semua riwayat pencarian"
+              >
+                <Trash2 className="h-3 w-3" aria-hidden="true" /> Hapus semua
+              </button>
+            </div>
+            <ul className="flex flex-wrap gap-2">
+              {recents.map((term) => (
+                <li
+                  key={term}
+                  className="flex items-center gap-0.5 rounded-full border bg-card py-1 pl-3 pr-1 text-xs"
+                >
+                  <button
+                    type="button"
+                    onClick={() => applyRecent(term)}
+                    className="max-w-[180px] truncate font-medium transition-colors hover:text-rose-500"
+                    aria-label={`Cari ${term}`}
+                  >
+                    {term}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => removeRecent(term)}
+                    className="flex h-5 w-5 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                    aria-label={`Hapus ${term} dari riwayat pencarian`}
+                  >
+                    <X className="h-3 w-3" aria-hidden="true" />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          </div>
         )}
         {searching && (
           <div role="tablist" aria-label={t("nav.search")} className="flex gap-1 overflow-x-auto rounded-full bg-muted p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
@@ -210,13 +340,11 @@ export function ExploreView({
           )}
 
           {searchQuery.data && resultCount === 0 && (
-            <div className="flex flex-col items-center gap-3 rounded-xl border bg-card p-8 text-center">
-              <span className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-rose-500/15 to-orange-400/15">
-                <UserRound className="h-7 w-7 text-rose-500" />
-              </span>
-              <p className="font-semibold">{t("search.noResults")}</p>
-              <p className="max-w-xs text-sm text-muted-foreground">{t("search.noResultsSub")}</p>
-            </div>
+            <EmptyState
+              icon={SearchX}
+              title={`Tidak ada hasil untuk “${search}”`}
+              subtitle={t("search.noResultsSub")}
+            />
           )}
 
           {/* Akun */}
@@ -265,12 +393,12 @@ export function ExploreView({
 
           {/* Ada hasil di kategori lain tapi tab ini kosong */}
           {resultCount > 0 && !anyInSection && (
-            <div className="flex flex-col items-center gap-3 rounded-xl border bg-card p-8 text-center">
-              <ImageOff className="h-8 w-8 text-muted-foreground" />
-              <p className="text-sm text-muted-foreground">
-                {t("search.noResults")} · {t("search.hint")}
-              </p>
-            </div>
+            <EmptyState
+              icon={ImageOff}
+              title={t("search.noResults")}
+              subtitle={t("search.hint")}
+              className="px-4 py-8 sm:px-6 sm:py-10"
+            />
           )}
         </div>
       ) : (
@@ -284,9 +412,11 @@ export function ExploreView({
             </div>
           )}
           {!isLoading && posts.length === 0 && (
-            <div className="rounded-xl border bg-card p-8 text-center text-sm text-muted-foreground">
-              Belum ada post untuk dijelajahi.
-            </div>
+            <EmptyState
+              icon={Compass}
+              title="Belum ada post untuk dijelajahi"
+              subtitle="Post terbaru dari komunitas akan muncul di sini begitu ada yang berbagi."
+            />
           )}
           <div className="grid grid-cols-2 gap-1.5 sm:grid-cols-3 sm:gap-2">
             {posts.map((p: Post) => (

@@ -7,6 +7,16 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
+import {
   Dialog,
   DialogContent,
   DialogDescription,
@@ -27,6 +37,9 @@ import type { Me, Comment } from "@/lib/types";
 import { usePost, useComments, useLike, useSave, useAddComment, useDeleteComment, useDeletePost, useReportPost, useEditPost } from "../hooks";
 import { UserAvatarLink } from "../user-avatar";
 import { AdminBadge } from "../admin-badge";
+import { SkelzVideo } from "../video-player";
+import { RichText } from "../richtext";
+import { EmojiPickerButton } from "../emoji-picker";
 import { formatCount, timeAgo, mediaThumb } from "../utils";
 import { goBack } from "../router";
 
@@ -125,6 +138,8 @@ export function PostDetailView({ id, me, onNeedLogin }: { id: string; me: Me | n
   const [reportReason, setReportReason] = useState("");
   const [editOpen, setEditOpen] = useState(false);
   const [editText, setEditText] = useState("");
+  // Konfirmasi hapus — tidak lagi terhapus langsung karena salah ketuk
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // BENIH CACHE: pakai data post dari cache feed/explore/profil supaya
@@ -274,20 +289,19 @@ export function PostDetailView({ id, me, onNeedLogin }: { id: string; me: Me | n
       </div>
 
       <article className="overflow-hidden rounded-xl border bg-card shadow-sm md:flex">
-        {/* Media */}
+        {/* Media — video memakai pemutar custom SkelzHub; gambar double-tap = suka */}
         <div
           className="relative select-none bg-black md:w-[58%]"
-          onDoubleClick={() => !post.likedByMe && like.mutate(post.id)}
+          onDoubleClick={isVideo ? undefined : () => !post.likedByMe && like.mutate(post.id)}
         >
           {isVideo ? (
-            <video
-              src={post.media ?? undefined}
-              controls
+            <SkelzVideo
+              src={post.media ?? ""}
+              className="aspect-square w-full md:aspect-auto md:h-full md:min-h-[560px]"
+              videoClassName="h-full w-full object-contain"
               loop
-              playsInline
-              preload="metadata"
-              className="aspect-square w-full bg-black object-contain md:aspect-auto md:h-full md:min-h-[560px]"
-              aria-label={`Video oleh ${post.author.username}`}
+              onDoubleTap={() => !post.likedByMe && like.mutate(post.id)}
+              ariaLabel={`Video oleh ${post.author.username}`}
             />
           ) : (
             <img
@@ -339,10 +353,7 @@ export function PostDetailView({ id, me, onNeedLogin }: { id: string; me: Me | n
                 {(isMine || isAdmin) && (
                   <DropdownMenuItem
                     className="text-destructive focus:text-destructive"
-                    onClick={() => {
-                      deletePost.mutate(post.id);
-                      goBack();
-                    }}
+                    onClick={() => setDeleteOpen(true)}
                   >
                     <Trash2 className="h-4 w-4" /> Hapus post{isAdmin && !isMine ? " (admin)" : ""}
                   </DropdownMenuItem>
@@ -359,7 +370,7 @@ export function PostDetailView({ id, me, onNeedLogin }: { id: string; me: Me | n
                   <a href={`#/u/${encodeURIComponent(post.author.username)}`} className="font-semibold hover:underline">
                     {post.author.username}
                   </a>{" "}
-                  {post.caption}
+                  <RichText text={post.caption} className="leading-relaxed" />
                 </p>
                 <p className="mt-1 text-xs text-muted-foreground">{timeAgo(post.createdAt)}</p>
               </div>
@@ -473,6 +484,7 @@ export function PostDetailView({ id, me, onNeedLogin }: { id: string; me: Me | n
                 </div>
               )}
               <div className="flex items-center gap-2">
+                <EmojiPickerButton onPick={(emoji) => setText((prev) => (prev ?? "") + emoji)} />
                 <Input
                   ref={inputRef}
                   value={text}
@@ -496,6 +508,33 @@ export function PostDetailView({ id, me, onNeedLogin }: { id: string; me: Me | n
           </div>
         </div>
       </article>
+
+      {/* Konfirmasi hapus post */}
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>Hapus post{isAdmin && !isMine ? " (admin)" : ""}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              Tindakan ini tidak bisa dibatalkan. Post beserta komentar di dalamnya akan dihapus permanen.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={deletePost.isPending}>Batal</AlertDialogCancel>
+            <AlertDialogAction
+              disabled={deletePost.isPending}
+              className="bg-destructive text-destructive-foreground hover:bg-destructive/90"
+              onClick={(e) => {
+                e.preventDefault();
+                deletePost.mutate(post.id);
+                setDeleteOpen(false);
+                goBack();
+              }}
+            >
+              {deletePost.isPending ? "Menghapus..." : "Hapus"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       {/* Dialog edit caption post (tanpa hapus + posting ulang) */}
       <Dialog open={editOpen} onOpenChange={setEditOpen}>

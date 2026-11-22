@@ -5,6 +5,8 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useTheme } from "next-themes";
 import {
   Camera,
+  Eye,
+  EyeOff,
   Loader2,
   Lock,
   LogOut,
@@ -36,6 +38,45 @@ function Section({ title, children }: { title: string; children: React.ReactNode
       <h2 className="mb-4 text-sm font-bold uppercase tracking-wide text-muted-foreground">{title}</h2>
       <div className="space-y-4">{children}</div>
     </section>
+  );
+}
+
+/** Input password dengan tombol mata — toggle terlihat/tersembunyi. */
+function PasswordInput({
+  id,
+  value,
+  onChange,
+  autoComplete,
+  label,
+}: {
+  id: string;
+  value: string;
+  onChange: (e: React.ChangeEvent<HTMLInputElement>) => void;
+  autoComplete?: string;
+  label: string;
+}) {
+  const [show, setShow] = useState(false);
+  return (
+    <div className="relative">
+      <Input
+        id={id}
+        type={show ? "text" : "password"}
+        value={value}
+        onChange={onChange}
+        autoComplete={autoComplete}
+        aria-label={label}
+        className="pr-11"
+      />
+      <button
+        type="button"
+        onClick={() => setShow((s) => !s)}
+        aria-label={show ? `Sembunyikan ${label}` : `Tampilkan ${label}`}
+        aria-pressed={show}
+        className="absolute right-1.5 top-1/2 flex h-7 w-7 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      >
+        {show ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+      </button>
+    </div>
   );
 }
 
@@ -322,7 +363,13 @@ export function SettingsView({ me }: { me: Me | null }) {
                 </div>
                 <div className="space-y-2">
                   <Label htmlFor="s-newpass">{t("a.forgotNewPass")}</Label>
-                  <Input id="s-newpass" type="password" value={newPass} onChange={(e) => setNewPass(e.target.value)} autoComplete="new-password" />
+                  <PasswordInput
+                    id="s-newpass"
+                    value={newPass}
+                    onChange={(e) => setNewPass(e.target.value)}
+                    autoComplete="new-password"
+                    label={t("a.forgotNewPass")}
+                  />
                   <p className="text-xs text-muted-foreground">{t("settings.passHint")}</p>
                 </div>
                 <div className="flex gap-2">

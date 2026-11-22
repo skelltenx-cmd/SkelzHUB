@@ -1,15 +1,17 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { ImageOff, Zap } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { ImageOff, Zap, Loader2, ChevronDown } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { cn } from "@/lib/utils";
 import type { Me } from "@/lib/types";
 import { useT } from "@/lib/i18n";
 import { useInfinitePosts, useSuggestions, useFollow } from "../hooks";
 import { PostCard } from "../post-card";
 import { StoriesRail } from "../story";
 import { UserAvatarLink } from "../user-avatar";
+import { EmptyState } from "../empty-state";
 
 // Saran akun untuk MOBILE (rail kanan hanya tampil di desktop) — supaya
 // pengguna ponsel juga bisa mengikuti akun dari saran Beranda.
@@ -107,11 +109,18 @@ export function FeedView({
   onNeedLogin: () => void;
 }) {
   const t = useT();
-  const feed = me ? "following" : "home";
+  // Tab feed ala sosmed besar: "Utama" (campuran terbaru) vs "Mengikuti".
+  const [tab, setTab] = useState<"foryou" | "following">("foryou");
+  const feed = me ? (tab === "foryou" ? "home" : "following") : "home";
   const query = useInfinitePosts({ feed, limit: 8, enabled: !meLoading });
   const sentinelRef = useRef<HTMLDivElement>(null);
 
-  const { data, isLoading, fetchNextPage, hasNextPage, isFetchingNextPage } = query;
+  // ---- Pull-to-refresh (gestur tarik-ke-bawah di ponsel) ----
+  const touchStartYRef = useRef<number | null>(null);
+  const [pull, setPull] = useState(0);
+  const PULL_THRESHOLD = 64;
+
+  const { data, isLoading, refetch, fetchNextPage, hasNextPage, isFetchingNextPage, isRefetching } = query;
   const posts = data?.pages.flatMap((p) => p.posts) ?? [];
 
   useEffect(() => {
@@ -133,8 +142,36 @@ export function FeedView({
     document.title = me ? `${t("feed.title")} · SkelzHub` : "SkelzHub — Bagikan momen & meme terbaikmu";
   }, [me, t]);
 
+  // Tarik ke bawah saat halaman sudah di puncak -> tahan indikator, lepas
+  // untuk menyegarkan feed (persis perilaku aplikasi sosial di ponsel).
+  function onTouchStart(e: React.TouchEvent) {
+    if (window.scrollY <= 0 && !isRefetching) {
+      touchStartYRef.current = e.touches[0].clientY;
+    } else {
+      touchStartYRef.current = null;
+    }
+  }
+  function onTouchMove(e: React.TouchEvent) {
+    if (touchStartYRef.current == null || window.scrollY > 0) return;
+    const dy = e.touches[0].clientY - touchStartYRef.current;
+    if (dy > 0) setPull(Math.min(dy * 0.45, 96));
+  }
+  function onTouchEnd() {
+    if (pull >= PULL_THRESHOLD && !isRefetching) {
+      void refetch();
+    }
+    setPull(0);
+    touchStartYRef.current = null;
+  }
+
   return (
-    <div className="mx-auto w-full max-w-[470px] px-3 py-4 sm:px-4 sm:py-6">
+    <div
+      className="mx-auto w-full max-w-[470px] px-3 py-4 sm:px-4 sm:py-6"
+      onTouchStart={onTouchStart}
+      onTouchMove={onTouchMove}
+      onTouchEnd={onTouchEnd}
+      onTouchCancel={onTouchEnd}
+    >
       {!me && !meLoading && <GuestBanner />}
 
       {me && (
@@ -146,6 +183,58 @@ export function FeedView({
           >
             <Zap className="h-4 w-4" /> {t("feed.createPost")}
           </a>
+        </div>
+      )}
+
+      {/* Indikator pull-to-refresh */}
+      {(pull > 0 || isRefetching) && (
+        <div
+          className="pointer-events-none mb-2 flex items-center justify-center"
+          style={{ height: isRefetching ? 36 : Math.max(pull, 0), opacity: isRefetching ? 1 : Math.min(1, pull / PULL_THRESHOLD) }}
+          aria-hidden="true"
+        >
+          {isRefetching ? (
+            <Loader2 className="h-6 w-6 animate-spin text-rose-500" />
+          ) : (
+            <ChevronDown
+              className="h-6 w-6 text-rose-500 transition-transform"
+              style={{ transform: `rotate(${pull >= PULL_THRESHOLD ? 180 : 0}deg)` }}
+            />
+          )}
+        </div>
+      )}
+
+      {/* Tab "Utama / Mengikuti" (hanya untuk yang login, ala Instagram) */}
+      {me && !meLoading && (
+        <div className="mb-4 flex items-center justify-center" role="tablist" aria-label="Jenis feed">
+          <div className="flex items-center gap-1 rounded-full border bg-card p-1 shadow-sm">
+            {(
+              [
+                { id: "foryou", label: "Utama" },
+                { id: "following", label: t("c.following") },
+              ] as const
+            ).map((item) => (
+              <button
+                key={item.id}
+                role="tab"
+                type="button"
+                aria-selected={tab === item.id}
+                onClick={() => setTab(item.id)}
+                className={cn(
+                  "relative rounded-full px-5 py-1.5 text-sm font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                  tab === item.id ? "text-white" : "text-muted-foreground hover:text-foreground"
+                )}
+              >
+                {tab === item.id && (
+                  <span
+                    aria-hidden="true"
+                    className="absolute inset-0 rounded-full bg-gradient-to-r from-rose-500 to-orange-400"
+                  />
+                )}
+                <span className="relative">{item.label}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
 
@@ -163,14 +252,12 @@ export function FeedView({
       )}
 
       {!isLoading && posts.length === 0 && (
-        <div className="flex flex-col items-center gap-3 rounded-xl border bg-card p-8 text-center">
-          <ImageOff className="h-10 w-10 text-muted-foreground" />
-          <p className="font-semibold">{t("feed.empty")}</p>
-          <p className="text-sm text-muted-foreground">{me ? t("feed.emptyMe") : t("feed.emptyGuest")}</p>
-          <a href="#/explore">
-            <Button variant="outline">{t("feed.exploreBtn")}</Button>
-          </a>
-        </div>
+        <EmptyState
+          icon={ImageOff}
+          title={t("feed.empty")}
+          subtitle={me ? t("feed.emptyMe") : t("feed.emptyGuest")}
+          action={{ label: t("feed.exploreBtn"), href: "#/explore" }}
+        />
       )}
 
       <div className="flex flex-col gap-6">

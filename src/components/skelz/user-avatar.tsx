@@ -1,13 +1,6 @@
 "use client";
 
 import { cn } from "@/lib/utils";
-import { Play, UserRound } from "lucide-react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 import { useT } from "@/lib/i18n";
 import { AVATAR_GRADIENTS, initials, mediaThumb } from "./utils";
 import { useStoryRing } from "./story-ring";
@@ -108,53 +101,33 @@ function StoryRingFrame({
   );
 }
 
-/** Menu pilihan saat ring story ditekan: lihat story atau buka profil.
- *
- *  Dipakai bersama oleh UserAvatarLink & UserAvatarStory supaya perilaku
- *  SAMA di semua tempat (feed, komentar, chat, notifikasi, jelajahi, dll.):
- *  ditekan -> muncul pilihan; tidak lagi langsung membuka story.
- *  `onOpenProfile` diberi lewat supaya konteks khusus (mis. dialog chat
- *  baru) bisa menutup dialognya sebelum berpindah halaman. */
-function StoryAvatarMenu({
+/** Avatar ber-ring yang membuka story LANGSUNG saat ditekan (satu ketukan,
+ *  seperti Instagram/TikTok). Dipakai bersama oleh UserAvatarLink &
+ *  UserAvatarStory supaya perilaku SAMA di semua tempat (feed, komentar,
+ *  chat, notifikasi, jelajahi, dll.). Profil tetap bisa dibuka lewat tautan
+ *  @username di sekitarnya — tidak perlu menu pilihan lagi. */
+function StoryOpenButton({
   name,
   username,
-  size,
   className,
-  onOpenProfile,
   children,
 }: {
   name: string;
   username: string;
-  size: number;
   className?: string;
-  onOpenProfile: () => void;
   children: React.ReactNode;
 }) {
   const t = useT();
   const story = useStoryRing();
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className={cn(
-            "shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
-            className
-          )}
-          aria-label={`${t("st.story")}: ${name}`}
-        >
-          {children}
-        </button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start">
-        <DropdownMenuItem onClick={() => story?.open(username)}>
-          <Play className="h-4 w-4" /> {t("st.viewStory")}
-        </DropdownMenuItem>
-        <DropdownMenuItem onClick={onOpenProfile}>
-          <UserRound className="h-4 w-4" /> {t("st.openProfile")}
-        </DropdownMenuItem>
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <button
+      type="button"
+      onClick={() => story?.open(username)}
+      className={cn("shrink-0 rounded-full focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring", className)}
+      aria-label={`${t("st.viewStory")}: ${name}`}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -171,23 +144,15 @@ export function UserAvatarLink({
   const story = useStoryRing();
   const info = story?.ring(username) ?? null;
 
-  // Punya story aktif -> ditekan muncul PILIHAN (lihat story / buka profil),
-  // persis permintaan interaksi ring story — bukan langsung membuka story.
+  // Punya story aktif -> satu ketukan langsung membuka viewer story
+  // (profil tetap tersedia lewat tautan @username di sekitar avatar).
   if (info) {
     return (
-      <StoryAvatarMenu
-        name={name}
-        username={username}
-        size={size}
-        className={className}
-        onOpenProfile={() => {
-          window.location.hash = `#/u/${encodeURIComponent(username)}`;
-        }}
-      >
+      <StoryOpenButton name={name} username={username} className={className}>
         <StoryRingFrame unseen={info.unseen} size={size}>
           <UserAvatar name={name} color={color} avatar={avatar} size={size} online={online} />
         </StoryRingFrame>
-      </StoryAvatarMenu>
+      </StoryOpenButton>
     );
   }
 
@@ -200,7 +165,7 @@ export function UserAvatarLink({
 
 /**
  * Avatar dengan ring story untuk konteks TANPA link (mis. baris daftar chat):
- * - punya story  -> ring + ditekan muncul pilihan (lihat story / buka profil)
+ * - punya story  -> ring + satu ketukan langsung membuka story
  * - tanpa story  -> klik opsional (fallbackHref / onFallback) atau polos
  */
 export function UserAvatarStory({
@@ -224,20 +189,12 @@ export function UserAvatarStory({
   const info = story?.ring(username) ?? null;
 
   if (info) {
-    // Pilihan "buka profil": hormati perilaku konteks kalau ada (onFallback
-    // biasanya sekaligus menutup dialog + memindah halaman), kalau tidak
-    // langsung menuju halaman profil user itu.
-    const openProfile = () => {
-      if (onFallback) onFallback();
-      else if (fallbackHref) window.location.hash = fallbackHref;
-      else window.location.hash = `#/u/${encodeURIComponent(username)}`;
-    };
     return (
-      <StoryAvatarMenu name={name} username={username} size={size} className={className} onOpenProfile={openProfile}>
+      <StoryOpenButton name={name} username={username} className={className}>
         <StoryRingFrame unseen={info.unseen} size={size}>
           <UserAvatar name={name} color={color} avatar={avatar} size={size} online={online} />
         </StoryRingFrame>
-      </StoryAvatarMenu>
+      </StoryOpenButton>
     );
   }
 

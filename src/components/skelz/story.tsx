@@ -2,11 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Eye, Filter as FilterIcon, Heart, Loader2, MessageCircle, Music, Pause, Play, Plus, Send, Trash2, Type, UserRound, X } from "lucide-react";
+import { Eye, Filter as FilterIcon, Heart, Loader2, MessageCircle, Music, Pause, Play, Plus, Send, Trash2, Type, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
-import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigger } from "@/components/ui/dropdown-menu";
 import { cn } from "@/lib/utils";
 import { api, uploadCaps } from "@/lib/api";
 import { useT } from "@/lib/i18n";
@@ -25,7 +24,6 @@ import {
 } from "./hooks";
 import { UserAvatar } from "./user-avatar";
 import { AdminBadge } from "./admin-badge";
-import { PhotoLightbox } from "./photo-lightbox";
 import { compressImage, fileToPreviewUrl, formatCount, timeAgo, mediaThumb } from "./utils";
 import { toast } from "@/hooks/use-toast";
 
@@ -675,8 +673,6 @@ export function StoriesRail({ me }: { me: Me | null }) {
   const groups = query.data?.groups ?? [];
   const [createOpen, setCreateOpen] = useState(false);
   const [viewerIndex, setViewerIndex] = useState<number | null>(null);
-  // Foto profil yang sedang diperbesar (lightbox) — null = tutup
-  const [avatarView, setAvatarView] = useState<string | null>(null);
 
   const myGroup = groups.find((g) => g.isMe);
   const others = groups.filter((g) => !g.isMe);
@@ -727,43 +723,24 @@ export function StoriesRail({ me }: { me: Me | null }) {
           <span className="w-full truncate text-center text-[11px] text-muted-foreground group-hover:text-foreground">{t("st.yourStory")}</span>
         </button>
 
-        {/* Story orang lain: klik -> pilihan Lihat Story atau Lihat Foto Profil */}
+        {/* Story orang lain: satu ketukan langsung membuka viewer story */}
         {others.map((g) => {
           const idx = groups.indexOf(g);
           return (
-            <DropdownMenu key={g.author.id}>
-              <DropdownMenuTrigger asChild>
-                <button
-                  type="button"
-                  className="group flex w-16 shrink-0 flex-col items-center gap-1.5"
-                  aria-label={`${t("st.story")}: ${g.author.displayName}`}
-                >
-                  <span className={cn("relative block rounded-full p-[2.5px] transition-transform active:scale-95", g.hasUnseen ? "animate-story-ring bg-gradient-to-tr from-rose-500 via-pink-500 to-orange-400" : "bg-muted-foreground/25")}>
-                    <span className="block rounded-full">
-                      <UserAvatar name={g.author.displayName} color={g.author.avatarColor} avatar={g.author.avatar} size={56} />
-                    </span>
-                  </span>
-                  <span className="w-full truncate text-center text-[11px] text-muted-foreground group-hover:text-foreground">@{g.author.username}</span>
-                </button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="start">
-                <DropdownMenuItem onClick={() => setViewerIndex(idx)}>
-                  <Play className="h-4 w-4" /> {t("st.viewStory")}
-                </DropdownMenuItem>
-                <DropdownMenuItem
-                  onClick={() => {
-                    window.location.hash = `#/u/${encodeURIComponent(g.author.username)}`;
-                  }}
-                >
-                  <UserRound className="h-4 w-4" /> {t("st.openProfile")}
-                </DropdownMenuItem>
-                {g.author.avatar && (
-                  <DropdownMenuItem onClick={() => setAvatarView(g.author.avatar ?? null)}>
-                    <UserRound className="h-4 w-4" /> {t("st.viewProfilePhoto")}
-                  </DropdownMenuItem>
-                )}
-              </DropdownMenuContent>
-            </DropdownMenu>
+            <button
+              key={g.author.id}
+              type="button"
+              onClick={() => setViewerIndex(idx)}
+              className="group flex w-16 shrink-0 flex-col items-center gap-1.5"
+              aria-label={`${t("st.viewStory")}: ${g.author.displayName}`}
+            >
+              <span className={cn("relative block rounded-full p-[2.5px] transition-transform active:scale-95", g.hasUnseen ? "animate-story-ring bg-gradient-to-tr from-rose-500 via-pink-500 to-orange-400" : "bg-muted-foreground/25")}>
+                <span className="block rounded-full">
+                  <UserAvatar name={g.author.displayName} color={g.author.avatarColor} avatar={g.author.avatar} size={56} />
+                </span>
+              </span>
+              <span className="w-full truncate text-center text-[11px] text-muted-foreground group-hover:text-foreground">@{g.author.username}</span>
+            </button>
           );
         })}
       </div>
@@ -772,7 +749,6 @@ export function StoriesRail({ me }: { me: Me | null }) {
         <StoryViewer groups={groups} startIndex={viewerIndex} me={me} onClose={() => setViewerIndex(null)} />
       )}
       {createOpen && me && <CreateStoryDialog me={me} onClose={() => setCreateOpen(false)} />}
-      <PhotoLightbox src={avatarView} alt="Foto profil" onClose={() => setAvatarView(null)} />
     </div>
   );
 }

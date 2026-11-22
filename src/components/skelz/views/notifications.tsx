@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Bell, Heart, MessageCircle, UserPlus, Repeat2, Check, X, CheckCheck, Lock, Eye } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -10,6 +10,7 @@ import type { Me, NotificationItem } from "@/lib/types";
 import { useNotifications, useMarkNotificationsRead, useFollowRequests, useResolveFollowRequest } from "../hooks";
 import { UserAvatar, UserAvatarLink } from "../user-avatar";
 import { AdminBadge } from "../admin-badge";
+import { EmptyState } from "../empty-state";
 import { timeAgo, mediaThumb } from "../utils";
 
 function notifText(n: NotificationItem, t: ReturnType<typeof useT>): string {
@@ -124,24 +125,93 @@ function RequestRow({
   );
 }
 
+// ---------- Filter kategori (client-side) ----------
+
+type NotifFilter = "all" | "like" | "comment" | "follow";
+
+const NOTIF_FILTERS: { key: NotifFilter; label: string }[] = [
+  { key: "all", label: "Semua" },
+  { key: "like", label: "Suka" },
+  { key: "comment", label: "Komentar" },
+  { key: "follow", label: "Ikut" },
+];
+
+/** Kategori notifikasi untuk filter tab (varian STORY_* mengikuti jenis dasarnya). */
+function notifFilterOf(n: NotificationItem): NotifFilter {
+  switch (n.type) {
+    case "LIKE":
+    case "STORY_LIKE":
+      return "like";
+    case "COMMENT":
+    case "STORY_COMMENT":
+      return "comment";
+    case "FOLLOW":
+    case "FOLLOW_REQUEST":
+    case "FOLLOW_ACCEPT":
+    case "REPOST":
+      return "follow";
+    default:
+      return "all";
+  }
+}
+
+// ---------- Pengelompokan hari (render-only, ringan) ----------
+
+function startOfDay(d: Date): number {
+  return new Date(d.getFullYear(), d.getMonth(), d.getDate()).getTime();
+}
+
+/** Label kelompok: "Hari ini" / "Kemarin" / tanggal lokal. */
+function dayLabelOf(date: Date): string {
+  const diffDays = Math.round((startOfDay(new Date()) - startOfDay(date)) / 86_400_000);
+  if (diffDays === 0) return "Hari ini";
+  if (diffDays === 1) return "Kemarin";
+  return date.toLocaleDateString("id-ID", { day: "numeric", month: "long", year: "numeric" });
+}
+
+type NotifDayGroup = { key: string; label: string; items: NotificationItem[] };
+
+function groupByDay(items: NotificationItem[]): NotifDayGroup[] {
+  const groups: NotifDayGroup[] = [];
+  const byKey = new Map<string, NotifDayGroup>();
+  for (const n of items) {
+    const d = new Date(n.createdAt);
+    const key = `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+    let g = byKey.get(key);
+    if (!g) {
+      g = { key, label: dayLabelOf(d), items: [] };
+      byKey.set(key, g);
+      groups.push(g);
+    }
+    g.items.push(n);
+  }
+  return groups;
+}
+
 export function NotificationsView({ me }: { me: Me | null }) {
   const t = useT();
   const query = useNotifications(!!me);
   const markRead = useMarkNotificationsRead();
   const requestsQuery = useFollowRequests(!!me);
   const requests = requestsQuery.data?.requests ?? [];
+  const [filter, setFilter] = useState<NotifFilter>("all");
 
   useEffect(() => {
     document.title = `${t("notif.title")} · SkelzHub`;
   }, [t]);
 
-  // Tandai semua terbaca saat view dibuka (permintaan ikut sengaja TIDAK ikut
-  // ditandai otomatis supaya tetap terlihat sampai diproses)
+  // Tandai semua terbaca HANYA SEKALI per kunjungan view — flag per mount
+  // mencegah effect saling kejar dengan refetch 30 dtk (dulu guard
+  // `!markRead.isPending` tanpa deps memicu mutate berulang saat data berganti).
+  // Permintaan ikut sengaja TIDAK ikut ditandai supaya tetap terlihat.
+  const markedOnce = useRef(false);
   useEffect(() => {
-    if (me && (query.data?.unread ?? 0) > 0 && !markRead.isPending) {
+    if (!me || markedOnce.current) return;
+    if ((query.data?.unread ?? 0) > 0 && !markRead.isPending) {
+      markedOnce.current = true;
       markRead.mutate();
     }
-  }, [me, query.data?.unread]);
+  }, [me, query.data?.unread, markRead]);
 
   if (!me) {
     return (
@@ -158,16 +228,42 @@ export function NotificationsView({ me }: { me: Me | null }) {
 
   const items = query.data?.items ?? [];
   const unread = query.data?.unread ?? 0;
+  const filtered = filter === "all" ? items : items.filter((n) => notifFilterOf(n) === filter);
+  const dayGroups = groupByDay(filtered);
+  const activeFilter = NOTIF_FILTERS.find((f) => f.key === filter);
 
   return (
     <div className="mx-auto w-full max-w-[470px] px-3 py-4 sm:px-4 sm:py-6">
-      <div className="mb-5 flex items-center justify-between">
+      <div className="mb-4 flex items-center justify-between">
         <h1 className="text-lg font-bold tracking-tight">{t("notif.title")}</h1>
         {unread > 0 && (
           <span className="flex items-center gap-1.5 rounded-full bg-rose-500/10 px-3 py-1 text-xs font-semibold text-rose-500">
             {unread > 99 ? "99+" : unread} {t("notif.new")}
           </span>
         )}
+      </div>
+
+      {/* Filter kategori: Semua / Suka / Komentar / Ikut */}
+      <div
+        role="tablist"
+        aria-label="Filter notifikasi"
+        className="mb-5 flex gap-1 overflow-x-auto rounded-full bg-muted p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden"
+      >
+        {NOTIF_FILTERS.map((f) => (
+          <button
+            key={f.key}
+            type="button"
+            role="tab"
+            aria-selected={filter === f.key}
+            onClick={() => setFilter(f.key)}
+            className={cn(
+              "h-8 min-w-[72px] shrink-0 rounded-full px-3 text-xs font-bold transition-colors",
+              filter === f.key ? "bg-background text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground"
+            )}
+          >
+            {f.label}
+          </button>
+        ))}
       </div>
 
       {/* Permintaan ikuti (akun privat) */}
@@ -196,22 +292,32 @@ export function NotificationsView({ me }: { me: Me | null }) {
           ))}
         </ul>
       ) : items.length === 0 && requests.length === 0 ? (
-        <div className="flex flex-col items-center gap-3 rounded-xl border bg-card p-10 text-center">
-          <span className="flex h-14 w-14 items-center justify-center rounded-full bg-gradient-to-br from-rose-500/15 to-orange-400/15">
-            <Bell className="h-7 w-7 text-rose-500" />
-          </span>
-          <p className="font-semibold">{t("notif.empty")}</p>
-          <p className="text-sm text-muted-foreground">{t("notif.emptySub")}</p>
-          <a href="#/create">
-            <Button variant="outline">{t("notif.makePost")}</Button>
-          </a>
-        </div>
+        <EmptyState
+          icon={Bell}
+          title={t("notif.empty")}
+          subtitle={t("notif.emptySub")}
+          action={{ label: t("notif.makePost"), href: "#/create" }}
+        />
+      ) : filtered.length === 0 ? (
+        <p className="py-10 text-center text-sm text-muted-foreground">
+          {filter === "all" ? "Belum ada notifikasi lain." : `Belum ada notifikasi ${activeFilter?.label.toLowerCase() ?? ""}.`}
+        </p>
       ) : (
-        <ul className="flex flex-col gap-3">
-          {items.map((n) => (
-            <NotifRow key={n.id} n={n} t={t} />
+        <div className="space-y-5">
+          {dayGroups.map((g) => (
+            <section key={g.key} aria-label={g.label}>
+              {/* Header hari — sticky kecil, menempel di bawah header mobile */}
+              <h2 className="sticky top-14 z-10 mb-2 bg-background/95 py-1.5 text-[11px] font-bold uppercase tracking-wider text-muted-foreground backdrop-blur-sm md:top-0">
+                {g.label}
+              </h2>
+              <ul className="flex flex-col gap-3">
+                {g.items.map((n) => (
+                  <NotifRow key={n.id} n={n} t={t} />
+                ))}
+              </ul>
+            </section>
           ))}
-        </ul>
+        </div>
       )}
 
       {!query.isLoading && items.length > 0 && unread === 0 && (
